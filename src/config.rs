@@ -30,6 +30,9 @@ impl Default for Settings {
 }
 
 fn read_settings(data_dir: &Path) -> Settings {
+    let _guard = SETTINGS_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let settings_file = data_dir.join("settings.json");
     if let Ok(content) = fs::read_to_string(&settings_file) {
         if let Ok(settings) = serde_json::from_str::<Settings>(&content) {

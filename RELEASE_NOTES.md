@@ -5,7 +5,7 @@ This release hardens the default posture to match DiscordChatExporter's safety m
 ## Highlights
 
 - **DiscordChatExporter-style safety — gateway is OPT-IN and OFF by default.** A new **Enable live gateway (higher detection risk)** checkbox in Settings controls it, and all three start sites respect the toggle.
-- **REST calls no longer spoof a browser client.** Removed `x-super-properties` and the Chrome user-agent from REST requests; they now send an honest `discord-context-mcp/1.0` UA. Browser properties remain only in the opt-in gateway IDENTIFY.
+- **REST calls no longer spoof a browser client.** Removed `x-super-properties` and the Chrome user-agent from REST requests; they now send an honest `discord-context-mcp/1.1.0` UA. Browser properties remain only in the opt-in gateway IDENTIFY.
 - **REST message search for DMs and servers.** Includes index-warmup retry plus a local SQLite FTS5 fallback, so a cold index never returns false empty results.
 - **Safer 429 handling.** Adds a +1s buffer, a 60s cap, and absolute reset deadlines, backed by a 2-permit concurrency semaphore.
 
@@ -32,4 +32,4 @@ This release hardens the default posture to match DiscordChatExporter's safety m
 
 ## Note
 
-If you explicitly want live gateway capture, enable the **Enable live gateway (higher detection risk)** toggle in Settings and restart.
+If you explicitly want live gateway capture, enable the **Enable live gateway (higher detection risk)** toggle in Settings, then use **Reconnect** (or restart the app) to start the gateway.
