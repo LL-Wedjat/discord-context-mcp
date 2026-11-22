@@ -8,7 +8,9 @@ use chrono::DateTime;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
-use crate::models::{DiscordChannel, DiscordGuild, DiscordMessage, DiscordUser, DmChannel};
+use crate::models::{
+    DiscordChannel, DiscordGuild, DiscordMessage, DiscordUser, DmChannel, PartialDiscordMessage,
+};
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct MessageRow {
@@ -273,6 +275,68 @@ impl Db {
         Ok(())
     }
 
+    pub fn update_partial_message(&self, partial: &PartialDiscordMessage) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let now = current_timestamp_ms();
+
+        if let Some(ref author) = partial.author {
+            drop(conn);
+            self.upsert_user(author)?;
+            return self.update_partial_message_fields(partial, now);
+        }
+
+        drop(conn);
+        self.update_partial_message_fields(partial, now)
+    }
+
+    fn update_partial_message_fields(
+        &self,
+        partial: &PartialDiscordMessage,
+        now: i64,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let mut sets = vec!["synced_at = ?".to_string()];
+        let mut query_params: Vec<rusqlite::types::Value> = vec![now.into()];
+
+        if let Some(ref content) = partial.content {
+            sets.push("content = ?".to_string());
+            query_params.push(content.clone().into());
+        }
+        if let Some(ref channel_id) = partial.channel_id {
+            sets.push("channel_id = ?".to_string());
+            query_params.push(channel_id.clone().into());
+        }
+        if let Some(ref author) = partial.author {
+            sets.push("author_id = ?".to_string());
+            query_params.push(author.id.clone().into());
+        }
+        if let Some(ref ts) = partial.timestamp {
+            sets.push("timestamp = ?".to_string());
+            query_params.push(ts.clone().into());
+        }
+        if let Some(ref edited) = partial.edited_timestamp {
+            sets.push("edited_timestamp = ?".to_string());
+            query_params.push(edited.clone().into());
+        }
+        if let Some(ref atts) = partial.attachments {
+            sets.push("attachments_json = ?".to_string());
+            if atts.is_empty() {
+                query_params.push(rusqlite::types::Value::Null);
+            } else {
+                query_params.push(serde_json::to_string(atts)?.into());
+            }
+        }
+        if let Some(ref rm) = partial.referenced_message {
+            sets.push("reply_to = ?".to_string());
+            query_params.push(rm.id.clone().into());
+        }
+
+        query_params.push(partial.id.clone().into());
+        let sql = format!("UPDATE messages SET {} WHERE id = ?", sets.join(", "));
+        conn.execute(&sql, rusqlite::params_from_iter(query_params))?;
+        Ok(())
+    }
+
     pub fn upsert_message(&self, message: &DiscordMessage) -> Result<()> {
         self.upsert_user(&message.author)?;
         let conn = self.conn.lock().unwrap();
@@ -297,11 +361,11 @@ impl Db {
                  channel_id = excluded.channel_id,
                  author_id = excluded.author_id,
                  content = excluded.content,
-                 timestamp = excluded.timestamp,
+                 timestamp = COALESCE(NULLIF(excluded.timestamp, ''), messages.timestamp),
                  edited_timestamp = excluded.edited_timestamp,
                  attachments_json = excluded.attachments_json,
                  reply_to = excluded.reply_to,
-                 created_at_ms = excluded.created_at_ms,
+                 created_at_ms = COALESCE(NULLIF(messages.created_at_ms, 0), excluded.created_at_ms),
                  synced_at = excluded.synced_at",
             params![
                 message.id,
@@ -355,23 +419,43 @@ impl Db {
         let limit = limit.unwrap_or(50).clamp(1, 100);
 
         let before_ms: Option<i64> = if let Some(b_id) = before {
-            conn.query_row(
-                "SELECT created_at_ms FROM messages WHERE id = ?1",
-                params![b_id],
-                |r| r.get(0),
-            )
-            .optional()?
+            let found: Option<i64> = conn
+                .query_row(
+                    "SELECT created_at_ms FROM messages WHERE id = ?1",
+                    params![b_id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            match found {
+                Some(ms) => Some(ms),
+                None => {
+                    return Err(anyhow::anyhow!(
+                        "Anchor message '{}' (before) not found in cache",
+                        b_id
+                    ))
+                }
+            }
         } else {
             None
         };
 
         let after_ms: Option<i64> = if let Some(a_id) = after {
-            conn.query_row(
-                "SELECT created_at_ms FROM messages WHERE id = ?1",
-                params![a_id],
-                |r| r.get(0),
-            )
-            .optional()?
+            let found: Option<i64> = conn
+                .query_row(
+                    "SELECT created_at_ms FROM messages WHERE id = ?1",
+                    params![a_id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            match found {
+                Some(ms) => Some(ms),
+                None => {
+                    return Err(anyhow::anyhow!(
+                        "Anchor message '{}' (after) not found in cache",
+                        a_id
+                    ))
+                }
+            }
         } else {
             None
         };
@@ -836,7 +920,7 @@ impl Db {
     }
 }
 
-fn escape_fts5_query(query: &str) -> String {
+pub fn escape_fts5_query(query: &str) -> String {
     let clean = query
         .replace('"', " ")
         .replace('*', " ")
@@ -845,16 +929,17 @@ fn escape_fts5_query(query: &str) -> String {
         .replace('(', " ")
         .replace(')', " ")
         .replace('-', " ")
-        .replace('+', " ")
-        .replace("NOT", " ")
-        .replace("AND", " ")
-        .replace("OR", " ");
+        .replace('+', " ");
 
     let terms: Vec<String> = clean
         .split_whitespace()
         .filter(|t| !t.is_empty())
-        .map(|t| format!("\"{}\"", t))
+        .filter(|t| {
+            let upper = t.to_ascii_uppercase();
+            upper != "AND" && upper != "OR" && upper != "NOT"
+        })
+        .map(|t| format!("\"{}\"", t.replace('"', "")))
         .collect();
 
-    terms.join(" ")
+    terms.join(" AND ")
 }

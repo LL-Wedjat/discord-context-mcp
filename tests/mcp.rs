@@ -105,7 +105,7 @@ fn test_tool_definitions() {
 async fn test_call_tool_cache_stats() {
     let db = Arc::new(Db::new_in_memory().expect("in-memory db failed"));
     let client = Arc::new(DiscordClient::new("dummy_token".to_string(), db.clone()).unwrap());
-    let ctx = AppContext { db, client };
+    let ctx = AppContext::new(db, Some(client));
 
     let res = call_tool(&ctx, "cache_stats", &json!({})).await;
     assert!(res.is_ok());
@@ -126,19 +126,47 @@ async fn test_http_jsonrpc_flow() {
 
     let db = Arc::new(Db::new_in_memory().expect("in-memory db failed"));
     let client = Arc::new(DiscordClient::new("dummy_token".to_string(), db.clone()).unwrap());
-    let ctx = AppContext { db, client };
+    let ctx = AppContext::new(db, Some(client));
 
-    // Test initialize
+    // Test initialize without version (defaults to 2025-06-18)
     let init_req = json!({
         "jsonrpc": "2.0",
         "id": 1,
         "method": "initialize",
         "params": {}
     });
-    let Json(init_resp) = mcp_post(State(ctx.clone()), Json(init_req)).await;
+    let resp = mcp_post(State(ctx.clone()), Json(init_req)).await;
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let init_resp: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(init_resp["id"], 1);
     assert_eq!(init_resp["result"]["protocolVersion"], "2025-06-18");
     assert_eq!(init_resp["result"]["serverInfo"]["name"], "discord-context");
+
+    // Test initialize echoing supported version
+    let init_echo_req = json!({
+        "jsonrpc": "2.0",
+        "id": 10,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-03-26"
+        }
+    });
+    let resp = mcp_post(State(ctx.clone()), Json(init_echo_req)).await;
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let echo_resp: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(echo_resp["result"]["protocolVersion"], "2025-03-26");
+
+    // Test notifications/initialized returns 204
+    let notif_req = json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/initialized"
+    });
+    let notif_resp = mcp_post(State(ctx.clone()), Json(notif_req)).await;
+    assert_eq!(notif_resp.status(), axum::http::StatusCode::NO_CONTENT);
 
     // Test tools/list
     let list_req = json!({
@@ -147,7 +175,11 @@ async fn test_http_jsonrpc_flow() {
         "method": "tools/list",
         "params": {}
     });
-    let Json(list_resp) = mcp_post(State(ctx.clone()), Json(list_req)).await;
+    let resp = mcp_post(State(ctx.clone()), Json(list_req)).await;
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let list_resp: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(list_resp["id"], 2);
     let tools = list_resp["result"]["tools"].as_array().unwrap();
     assert_eq!(tools.len(), 8);
@@ -162,7 +194,11 @@ async fn test_http_jsonrpc_flow() {
             "arguments": {}
         }
     });
-    let Json(call_resp) = mcp_post(State(ctx.clone()), Json(call_req)).await;
+    let resp = mcp_post(State(ctx.clone()), Json(call_req)).await;
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let call_resp: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(call_resp["id"], 3);
     assert!(call_resp["result"]["content"][0]["text"]
         .as_str()
@@ -175,7 +211,42 @@ async fn test_http_jsonrpc_flow() {
         "id": 4,
         "method": "non_existent_method"
     });
-    let Json(bad_resp) = mcp_post(State(ctx.clone()), Json(bad_req)).await;
+    let resp = mcp_post(State(ctx.clone()), Json(bad_req)).await;
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let bad_resp: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(bad_resp["id"], 4);
     assert_eq!(bad_resp["error"]["code"], -32601);
+}
+
+#[tokio::test]
+async fn test_swappable_client_observed_by_call_tool() {
+    let db = Arc::new(Db::new_in_memory().expect("in-memory db failed"));
+    let ctx = AppContext::new(db.clone(), None);
+
+    // Initial state: client is None. Network tool returns clear 'no token' error.
+    let res_none = call_tool(&ctx, "refresh", &json!({})).await;
+    assert!(res_none.is_err());
+    let err_msg = res_none.unwrap_err();
+    assert!(
+        err_msg.contains("No Discord token configured"),
+        "expected 'No Discord token configured', got '{}'",
+        err_msg
+    );
+
+    // Swap in a live client
+    let client = Arc::new(DiscordClient::new("dummy_token".to_string(), db.clone()).unwrap());
+    ctx.set_client(Some(client)).await;
+
+    // Now call_tool observes the new client and does not return the 'no token' error
+    let res_some = call_tool(&ctx, "refresh", &json!({})).await;
+    // The request attempts network with the dummy token and may fail, but NOT with 'No Discord token configured'
+    if let Err(e) = res_some {
+        assert!(
+            !e.contains("No Discord token configured"),
+            "should not return 'no token' error after setting client, got '{}'",
+            e
+        );
+    }
 }

@@ -42,6 +42,79 @@ fn create_tray_icon() -> Result<Icon> {
     Ok(icon)
 }
 
+#[cfg(windows)]
+pub fn run_tray(state: AppState, event_proxy: UnboundedSender<TrayAction>) -> Result<()> {
+    use windows_sys::Win32::Foundation::HWND;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        DispatchMessageW, PeekMessageW, TranslateMessage, MSG, PM_REMOVE,
+    };
+
+    let tray_menu = Menu::new();
+
+    let open_item = MenuItem::new("Open Settings", true, None);
+    let reconnect_item = MenuItem::new("Reconnect", true, None);
+    let quit_item = MenuItem::new("Quit", true, None);
+
+    let open_id = open_item.id().clone();
+    let reconnect_id = reconnect_item.id().clone();
+    let quit_id = quit_item.id().clone();
+
+    tray_menu.append(&open_item)?;
+    tray_menu.append(&reconnect_item)?;
+    tray_menu.append(&PredefinedMenuItem::separator())?;
+    tray_menu.append(&quit_item)?;
+
+    let icon = create_tray_icon()?;
+
+    let _tray_icon = TrayIconBuilder::new()
+        .with_menu(Box::new(tray_menu))
+        .with_tooltip("Discord Context MCP")
+        .with_icon(icon)
+        .build()?;
+
+    info!("System tray initialized with Win32 message pump");
+
+    let menu_channel = MenuEvent::receiver();
+    let tray_channel = TrayIconEvent::receiver();
+
+    while !state.shutdown.load(Ordering::SeqCst) {
+        unsafe {
+            let mut msg: MSG = std::mem::zeroed();
+            // Non-blocking peek / pump of Windows messages
+            while PeekMessageW(&mut msg, 0 as HWND, 0, 0, PM_REMOVE) != 0 {
+                TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+        }
+
+        // Poll menu events
+        while let Ok(event) = menu_channel.try_recv() {
+            if event.id == open_id {
+                let _ = event_proxy.send(TrayAction::OpenSettings);
+            } else if event.id == reconnect_id {
+                let _ = event_proxy.send(TrayAction::Reconnect);
+            } else if event.id == quit_id {
+                let _ = event_proxy.send(TrayAction::Quit);
+                state.trigger_shutdown();
+                break;
+            }
+        }
+
+        // Poll tray icon events (double click or click to open)
+        while let Ok(event) = tray_channel.try_recv() {
+            if let TrayIconEvent::DoubleClick { .. } = event {
+                let _ = event_proxy.send(TrayAction::OpenSettings);
+            }
+        }
+
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    info!("Tray event loop terminating");
+    Ok(())
+}
+
+#[cfg(not(windows))]
 pub fn run_tray(state: AppState, event_proxy: UnboundedSender<TrayAction>) -> Result<()> {
     let tray_menu = Menu::new();
 
@@ -72,7 +145,6 @@ pub fn run_tray(state: AppState, event_proxy: UnboundedSender<TrayAction>) -> Re
     let tray_channel = TrayIconEvent::receiver();
 
     while !state.shutdown.load(Ordering::SeqCst) {
-        // Poll menu events
         while let Ok(event) = menu_channel.try_recv() {
             if event.id == open_id {
                 let _ = event_proxy.send(TrayAction::OpenSettings);
@@ -85,7 +157,6 @@ pub fn run_tray(state: AppState, event_proxy: UnboundedSender<TrayAction>) -> Re
             }
         }
 
-        // Poll tray icon events (double click or click to open)
         while let Ok(event) = tray_channel.try_recv() {
             if let TrayIconEvent::DoubleClick { .. } = event {
                 let _ = event_proxy.send(TrayAction::OpenSettings);

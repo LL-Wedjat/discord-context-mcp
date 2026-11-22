@@ -2,12 +2,13 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use axum::extract::State;
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_json::{json, Value};
-use tower_http::cors::CorsLayer;
 use tracing::info;
 
 use crate::db::{Db, MessageRow, SearchFilters};
@@ -17,7 +18,25 @@ use crate::models::{DiscordChannel, DiscordGuild};
 #[derive(Clone)]
 pub struct AppContext {
     pub db: Arc<Db>,
-    pub client: Arc<DiscordClient>,
+    pub client: Arc<tokio::sync::RwLock<Option<Arc<DiscordClient>>>>,
+}
+
+impl AppContext {
+    pub fn new(db: Arc<Db>, client: Option<Arc<DiscordClient>>) -> Self {
+        Self {
+            db,
+            client: Arc::new(tokio::sync::RwLock::new(client)),
+        }
+    }
+
+    pub async fn live_client(&self) -> Option<Arc<DiscordClient>> {
+        self.client.read().await.clone()
+    }
+
+    pub async fn set_client(&self, client: Option<Arc<DiscordClient>>) {
+        let mut guard = self.client.write().await;
+        *guard = client;
+    }
 }
 
 pub fn text_result(text: &str) -> Value {
@@ -288,11 +307,22 @@ pub fn tool_definitions() -> Vec<Value> {
     ]
 }
 
+fn sanitize_err(client: Option<&Arc<DiscordClient>>, err: &str) -> String {
+    if let Some(c) = client {
+        c.sanitize(err)
+    } else {
+        err.to_string()
+    }
+}
+
 pub async fn call_tool(
     ctx: &AppContext,
     name: &str,
     args: &serde_json::Value,
 ) -> Result<serde_json::Value, String> {
+    let client_opt = ctx.live_client().await;
+    let client_ref = client_opt.as_ref();
+
     match name {
         "list_servers" => {
             let query = args.get("query").and_then(|v| v.as_str());
@@ -300,19 +330,30 @@ pub async fn call_tool(
             let current_guilds = ctx
                 .db
                 .list_guilds(None)
-                .map_err(|e| ctx.client.sanitize(&e.to_string()))?;
+                .map_err(|e| sanitize_err(client_ref, &e.to_string()))?;
 
-            if current_guilds.is_empty() && !ctx.client.token.trim().is_empty() {
-                let _ = ctx.client.list_guilds().await;
+            let mut refresh_note: Option<String> = None;
+            if current_guilds.is_empty() {
+                if let Some(c) = client_ref {
+                    if let Err(e) = c.list_guilds().await {
+                        refresh_note = Some(format!(
+                            "\n\n_Note: live refresh failed: {}; showing cached data._",
+                            c.sanitize(&e.to_string())
+                        ));
+                    }
+                }
             }
 
             let guilds = ctx
                 .db
                 .list_guilds(query)
-                .map_err(|e| ctx.client.sanitize(&e.to_string()))?;
+                .map_err(|e| sanitize_err(client_ref, &e.to_string()))?;
 
             let mut formatted = format_items(&guilds, "Discord Servers", &["id", "name"]);
             formatted.push_str("\n\nUse read_channel(server, channel, lastN) to read messages from a specific channel.");
+            if let Some(note) = refresh_note {
+                formatted.push_str(&note);
+            }
             Ok(text_result(&formatted))
         }
 
@@ -323,42 +364,61 @@ pub async fn call_tool(
                 .ok_or_else(|| "Missing required parameter 'server'".to_string())?;
             let query = args.get("query").and_then(|v| v.as_str());
 
+            let mut refresh_note: Option<String> = None;
             let mut guild = ctx
                 .db
                 .find_guild(server_arg)
-                .map_err(|e| ctx.client.sanitize(&e.to_string()))?;
+                .map_err(|e| sanitize_err(client_ref, &e.to_string()))?;
 
-            if guild.is_none() && !ctx.client.token.trim().is_empty() {
-                let _ = ctx.client.list_guilds().await;
-                guild = ctx
-                    .db
-                    .find_guild(server_arg)
-                    .map_err(|e| ctx.client.sanitize(&e.to_string()))?;
+            if guild.is_none() {
+                if let Some(c) = client_ref {
+                    if let Err(e) = c.list_guilds().await {
+                        refresh_note = Some(format!(
+                            "\n\n_Note: live refresh failed: {}; showing cached data._",
+                            c.sanitize(&e.to_string())
+                        ));
+                    }
+                    guild = ctx
+                        .db
+                        .find_guild(server_arg)
+                        .map_err(|e| sanitize_err(client_ref, &e.to_string()))?;
+                }
             }
 
             let guild = guild.ok_or_else(|| {
                 format!(
-                    "Server not found: '{}'. Use list_servers to see available servers.",
-                    server_arg
+                    "Server not found: '{}'. Use list_servers to see available servers.{}",
+                    server_arg,
+                    refresh_note.as_deref().unwrap_or("")
                 )
             })?;
 
             let current_channels = ctx
                 .db
                 .list_channels(&guild.id, None)
-                .map_err(|e| ctx.client.sanitize(&e.to_string()))?;
+                .map_err(|e| sanitize_err(client_ref, &e.to_string()))?;
 
-            if current_channels.is_empty() && !ctx.client.token.trim().is_empty() {
-                let _ = ctx.client.list_channels(&guild.id).await;
+            if current_channels.is_empty() {
+                if let Some(c) = client_ref {
+                    if let Err(e) = c.list_channels(&guild.id).await {
+                        refresh_note = Some(format!(
+                            "\n\n_Note: live refresh failed: {}; showing cached data._",
+                            c.sanitize(&e.to_string())
+                        ));
+                    }
+                }
             }
 
             let channels = ctx
                 .db
                 .list_channels(&guild.id, query)
-                .map_err(|e| ctx.client.sanitize(&e.to_string()))?;
+                .map_err(|e| sanitize_err(client_ref, &e.to_string()))?;
 
             let title = format!("Channels in {}", guild.name);
-            let formatted = format_items(&channels, &title, &["id", "name", "type", "topic"]);
+            let mut formatted = format_items(&channels, &title, &["id", "name", "type", "topic"]);
+            if let Some(note) = refresh_note {
+                formatted.push_str(&note);
+            }
             Ok(text_result(&formatted))
         }
 
@@ -368,16 +428,24 @@ pub async fn call_tool(
             let current_dms = ctx
                 .db
                 .list_dm_people(None)
-                .map_err(|e| ctx.client.sanitize(&e.to_string()))?;
+                .map_err(|e| sanitize_err(client_ref, &e.to_string()))?;
 
-            if current_dms.is_empty() && !ctx.client.token.trim().is_empty() {
-                let _ = ctx.client.list_dm_channels().await;
+            let mut refresh_note: Option<String> = None;
+            if current_dms.is_empty() {
+                if let Some(c) = client_ref {
+                    if let Err(e) = c.list_dm_channels().await {
+                        refresh_note = Some(format!(
+                            "\n\n_Note: live refresh failed: {}; showing cached data._",
+                            c.sanitize(&e.to_string())
+                        ));
+                    }
+                }
             }
 
             let dms = ctx
                 .db
                 .list_dm_people(query)
-                .map_err(|e| ctx.client.sanitize(&e.to_string()))?;
+                .map_err(|e| sanitize_err(client_ref, &e.to_string()))?;
 
             let mapped: Vec<Value> = dms
                 .into_iter()
@@ -391,11 +459,14 @@ pub async fn call_tool(
                 })
                 .collect();
 
-            let formatted = format_items(
+            let mut formatted = format_items(
                 &mapped,
                 "DM Contacts",
                 &["userId", "username", "global_name", "channelId"],
             );
+            if let Some(note) = refresh_note {
+                formatted.push_str(&note);
+            }
             Ok(text_result(&formatted))
         }
 
@@ -411,62 +482,81 @@ pub async fn call_tool(
                 .unwrap_or(50)
                 .clamp(1, 100) as usize;
 
+            let mut refresh_note: Option<String> = None;
             let mut user = ctx
                 .db
                 .find_user(person_arg)
-                .map_err(|e| ctx.client.sanitize(&e.to_string()))?;
+                .map_err(|e| sanitize_err(client_ref, &e.to_string()))?;
 
             let mut dms = ctx
                 .db
                 .list_dm_people(None)
-                .map_err(|e| ctx.client.sanitize(&e.to_string()))?;
+                .map_err(|e| sanitize_err(client_ref, &e.to_string()))?;
 
             let mut matched_dm = user
                 .as_ref()
                 .and_then(|u| dms.iter().find(|d| d.recipient.id == u.id).cloned());
 
-            if (user.is_none() || matched_dm.is_none()) && !ctx.client.token.trim().is_empty() {
-                let _ = ctx.client.list_dm_channels().await;
-                user = ctx
-                    .db
-                    .find_user(person_arg)
-                    .map_err(|e| ctx.client.sanitize(&e.to_string()))?;
-                dms = ctx
-                    .db
-                    .list_dm_people(None)
-                    .map_err(|e| ctx.client.sanitize(&e.to_string()))?;
-                matched_dm = user
-                    .as_ref()
-                    .and_then(|u| dms.iter().find(|d| d.recipient.id == u.id).cloned());
+            if user.is_none() || matched_dm.is_none() {
+                if let Some(c) = client_ref {
+                    if let Err(e) = c.list_dm_channels().await {
+                        refresh_note = Some(format!(
+                            "\n\n_Note: live refresh failed: {}; showing cached data._",
+                            c.sanitize(&e.to_string())
+                        ));
+                    }
+                    user = ctx
+                        .db
+                        .find_user(person_arg)
+                        .map_err(|e| sanitize_err(client_ref, &e.to_string()))?;
+                    dms = ctx
+                        .db
+                        .list_dm_people(None)
+                        .map_err(|e| sanitize_err(client_ref, &e.to_string()))?;
+                    matched_dm = user
+                        .as_ref()
+                        .and_then(|u| dms.iter().find(|d| d.recipient.id == u.id).cloned());
+                }
             }
 
             let user = user.ok_or_else(|| {
                 format!(
-                    "User not found: '{}'. Use list_dm_people to see recent contacts.",
-                    person_arg
+                    "User not found: '{}'. Use list_dm_people to see recent contacts.{}",
+                    person_arg,
+                    refresh_note.as_deref().unwrap_or("")
                 )
             })?;
 
             let dm = matched_dm.ok_or_else(|| {
                 format!(
-                    "No DM channel found with user '{}' ({}).",
-                    user.username, user.id
+                    "No DM channel found with user '{}' ({}).{}",
+                    user.username,
+                    user.id,
+                    refresh_note.as_deref().unwrap_or("")
                 )
             })?;
 
-            if !ctx.client.token.trim().is_empty() {
-                let _ = ctx.client.fetch_messages(&dm.id, last_n, None).await;
+            if let Some(c) = client_ref {
+                if let Err(e) = c.fetch_messages(&dm.id, last_n, None).await {
+                    refresh_note = Some(format!(
+                        "\n\n_Note: live refresh failed: {}; showing cached data._",
+                        c.sanitize(&e.to_string())
+                    ));
+                }
             }
 
             let rows = ctx
                 .db
                 .get_messages(&dm.id, Some(last_n), None, None)
-                .map_err(|e| ctx.client.sanitize(&e.to_string()))?;
+                .map_err(|e| sanitize_err(client_ref, &e.to_string()))?;
 
             let display = user.global_name.as_deref().unwrap_or(&user.username);
-
             let title = format!("DM with {}", display);
-            Ok(text_result(&format_messages(&rows, &title)))
+            let mut formatted = format_messages(&rows, &title);
+            if let Some(note) = refresh_note {
+                formatted.push_str(&note);
+            }
+            Ok(text_result(&formatted))
         }
 
         "read_channel" => {
@@ -485,57 +575,83 @@ pub async fn call_tool(
                 .unwrap_or(50)
                 .clamp(1, 100) as usize;
 
+            let mut refresh_note: Option<String> = None;
             let mut guild: Option<DiscordGuild> = ctx
                 .db
                 .find_guild(server_arg)
-                .map_err(|e| ctx.client.sanitize(&e.to_string()))?;
+                .map_err(|e| sanitize_err(client_ref, &e.to_string()))?;
 
-            if guild.is_none() && !ctx.client.token.trim().is_empty() {
-                let _ = ctx.client.list_guilds().await;
-                guild = ctx
-                    .db
-                    .find_guild(server_arg)
-                    .map_err(|e| ctx.client.sanitize(&e.to_string()))?;
+            if guild.is_none() {
+                if let Some(c) = client_ref {
+                    if let Err(e) = c.list_guilds().await {
+                        refresh_note = Some(format!(
+                            "\n\n_Note: live refresh failed: {}; showing cached data._",
+                            c.sanitize(&e.to_string())
+                        ));
+                    }
+                    guild = ctx
+                        .db
+                        .find_guild(server_arg)
+                        .map_err(|e| sanitize_err(client_ref, &e.to_string()))?;
+                }
             }
 
             let guild = guild.ok_or_else(|| {
                 format!(
-                    "Server not found: '{}'. Use list_servers to see available servers.",
-                    server_arg
+                    "Server not found: '{}'. Use list_servers to see available servers.{}",
+                    server_arg,
+                    refresh_note.as_deref().unwrap_or("")
                 )
             })?;
 
             let mut channel: Option<DiscordChannel> =
                 ctx.db
                     .find_channel(&guild.id, channel_arg)
-                    .map_err(|e| ctx.client.sanitize(&e.to_string()))?;
+                    .map_err(|e| sanitize_err(client_ref, &e.to_string()))?;
 
-            if channel.is_none() && !ctx.client.token.trim().is_empty() {
-                let _ = ctx.client.list_channels(&guild.id).await;
-                channel = ctx
-                    .db
-                    .find_channel(&guild.id, channel_arg)
-                    .map_err(|e| ctx.client.sanitize(&e.to_string()))?;
+            if channel.is_none() {
+                if let Some(c) = client_ref {
+                    if let Err(e) = c.list_channels(&guild.id).await {
+                        refresh_note = Some(format!(
+                            "\n\n_Note: live refresh failed: {}; showing cached data._",
+                            c.sanitize(&e.to_string())
+                        ));
+                    }
+                    channel = ctx
+                        .db
+                        .find_channel(&guild.id, channel_arg)
+                        .map_err(|e| sanitize_err(client_ref, &e.to_string()))?;
+                }
             }
 
             let channel = channel.ok_or_else(|| {
                 format!(
-                    "Channel not found: '{}' in server '{}'. Use list_channels to see available channels.",
-                    channel_arg, guild.name
+                    "Channel not found: '{}' in server '{}'. Use list_channels to see available channels.{}",
+                    channel_arg, guild.name,
+                    refresh_note.as_deref().unwrap_or("")
                 )
             })?;
 
-            if !ctx.client.token.trim().is_empty() {
-                let _ = ctx.client.fetch_messages(&channel.id, last_n, None).await;
+            if let Some(c) = client_ref {
+                if let Err(e) = c.fetch_messages(&channel.id, last_n, None).await {
+                    refresh_note = Some(format!(
+                        "\n\n_Note: live refresh failed: {}; showing cached data._",
+                        c.sanitize(&e.to_string())
+                    ));
+                }
             }
 
             let rows = ctx
                 .db
                 .get_messages(&channel.id, Some(last_n), None, None)
-                .map_err(|e| ctx.client.sanitize(&e.to_string()))?;
+                .map_err(|e| sanitize_err(client_ref, &e.to_string()))?;
 
             let title = format!("#{} in {}", channel.name, guild.name);
-            Ok(text_result(&format_messages(&rows, &title)))
+            let mut formatted = format_messages(&rows, &title);
+            if let Some(note) = refresh_note {
+                formatted.push_str(&note);
+            }
+            Ok(text_result(&formatted))
         }
 
         "search_messages" => {
@@ -577,10 +693,18 @@ pub async fn call_tool(
             let stats = ctx
                 .db
                 .stats()
-                .map_err(|e| ctx.client.sanitize(&e.to_string()))?;
+                .map_err(|e| sanitize_err(client_ref, &e.to_string()))?;
 
-            if stats.messages == 0 && !ctx.client.token.trim().is_empty() {
-                let _ = ctx.client.sync_recent(2, 5, 10, 100).await;
+            let mut refresh_note: Option<String> = None;
+            if stats.messages == 0 {
+                if let Some(c) = client_ref {
+                    if let Err(e) = c.sync_recent(2, 5, 10, 100).await {
+                        refresh_note = Some(format!(
+                            "\n\n_Note: live refresh failed: {}; showing cached data._",
+                            c.sanitize(&e.to_string())
+                        ));
+                    }
+                }
             }
 
             let filters = SearchFilters {
@@ -593,25 +717,32 @@ pub async fn call_tool(
             let rows = ctx
                 .db
                 .search_messages(text_arg, &filters)
-                .map_err(|e| ctx.client.sanitize(&e.to_string()))?;
+                .map_err(|e| sanitize_err(client_ref, &e.to_string()))?;
 
             let title = format!("Search: {}", text_arg);
-            Ok(text_result(&format_messages(&rows, &title)))
+            let mut formatted = format_messages(&rows, &title);
+            if let Some(note) = refresh_note {
+                formatted.push_str(&note);
+            }
+            Ok(text_result(&formatted))
         }
 
         "cache_stats" => {
             let stats = ctx
                 .db
                 .stats()
-                .map_err(|e| ctx.client.sanitize(&e.to_string()))?;
+                .map_err(|e| sanitize_err(client_ref, &e.to_string()))?;
 
-            let stats_val =
-                serde_json::to_value(&stats).map_err(|e| ctx.client.sanitize(&e.to_string()))?;
+            let stats_val = serde_json::to_value(&stats)
+                .map_err(|e| sanitize_err(client_ref, &e.to_string()))?;
 
             Ok(json_result(stats_val))
         }
 
         "refresh" => {
+            let c = client_opt
+                .ok_or_else(|| "No Discord token configured — open Settings".to_string())?;
+
             let scope = args.get("scope").and_then(|v| v.as_str()).unwrap_or("all");
 
             let per_channel = args
@@ -622,14 +753,13 @@ pub async fn call_tool(
 
             let summary = match scope {
                 "servers" => {
-                    let guilds = ctx
-                        .client
+                    let guilds = c
                         .list_guilds()
                         .await
-                        .map_err(|e| ctx.client.sanitize(&e.to_string()))?;
+                        .map_err(|e| c.sanitize(&e.to_string()))?;
                     let mut channel_count = 0;
                     for g in guilds.iter().take(5) {
-                        if let Ok(channels) = ctx.client.list_channels(&g.id).await {
+                        if let Ok(channels) = c.list_channels(&g.id).await {
                             channel_count += channels.len();
                         }
                     }
@@ -640,19 +770,17 @@ pub async fn call_tool(
                     )
                 }
                 "dms" => {
-                    let dms = ctx
-                        .client
+                    let dms = c
                         .list_dm_channels()
                         .await
-                        .map_err(|e| ctx.client.sanitize(&e.to_string()))?;
+                        .map_err(|e| c.sanitize(&e.to_string()))?;
                     format!("Refreshed {} DM channels", dms.len())
                 }
                 _ => {
-                    let report = ctx
-                        .client
+                    let report = c
                         .sync_recent(3, 10, 20, per_channel)
                         .await
-                        .map_err(|e| ctx.client.sanitize(&e.to_string()))?;
+                        .map_err(|e| c.sanitize(&e.to_string()))?;
                     format!(
                         "Synced {} channels and {} messages (errors: {})",
                         report.channels_fetched,
@@ -662,10 +790,7 @@ pub async fn call_tool(
                 }
             };
 
-            let stats = ctx
-                .db
-                .stats()
-                .map_err(|e| ctx.client.sanitize(&e.to_string()))?;
+            let stats = ctx.db.stats().map_err(|e| c.sanitize(&e.to_string()))?;
 
             Ok(json_result(json!({
                 "summary": summary,
@@ -678,14 +803,27 @@ pub async fn call_tool(
     }
 }
 
-pub async fn mcp_post(State(ctx): State<AppContext>, Json(req): Json<Value>) -> Json<Value> {
+pub async fn mcp_post(
+    State(ctx): State<AppContext>,
+    Json(req): Json<Value>,
+) -> axum::response::Response {
     let id = req.get("id").cloned();
     let method = req.get("method").and_then(|v| v.as_str()).unwrap_or("");
 
     match method {
         "initialize" => {
+            let requested_version = req
+                .get("params")
+                .and_then(|p| p.get("protocolVersion"))
+                .and_then(|v| v.as_str());
+
+            let protocol_version = match requested_version {
+                Some("2025-06-18") | Some("2025-03-26") => requested_version.unwrap(),
+                _ => "2025-06-18",
+            };
+
             let result = json!({
-                "protocolVersion": "2025-06-18",
+                "protocolVersion": protocol_version,
                 "capabilities": {
                     "tools": {}
                 },
@@ -699,10 +837,11 @@ pub async fn mcp_post(State(ctx): State<AppContext>, Json(req): Json<Value>) -> 
                 "id": id,
                 "result": result
             }))
+            .into_response()
         }
         "notifications/initialized" => {
-            // Notification: return empty JSON object
-            Json(json!({}))
+            // Notification: return 204 No Content
+            StatusCode::NO_CONTENT.into_response()
         }
         "tools/list" => {
             let result = json!({
@@ -713,6 +852,7 @@ pub async fn mcp_post(State(ctx): State<AppContext>, Json(req): Json<Value>) -> 
                 "id": id,
                 "result": result
             }))
+            .into_response()
         }
         "tools/call" => {
             let params = req.get("params").cloned().unwrap_or(Value::Null);
@@ -730,6 +870,7 @@ pub async fn mcp_post(State(ctx): State<AppContext>, Json(req): Json<Value>) -> 
                 "id": id,
                 "result": result
             }))
+            .into_response()
         }
         _ => Json(json!({
             "jsonrpc": "2.0",
@@ -738,7 +879,8 @@ pub async fn mcp_post(State(ctx): State<AppContext>, Json(req): Json<Value>) -> 
                 "code": -32601,
                 "message": format!("Method not found: {}", method)
             }
-        })),
+        }))
+        .into_response(),
     }
 }
 
@@ -746,11 +888,39 @@ pub async fn health() -> &'static str {
     "ok"
 }
 
+fn is_allowed_host_or_origin(val: &str) -> bool {
+    let s = val
+        .trim_start_matches("http://")
+        .trim_start_matches("https://");
+    let host = s.split('/').next().unwrap_or(s);
+    host.starts_with("127.0.0.1") || host.starts_with("localhost")
+}
+
+pub async fn validate_local_headers(
+    headers: HeaderMap,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Result<axum::response::Response, StatusCode> {
+    if let Some(origin) = headers.get("origin").and_then(|v| v.to_str().ok()) {
+        if !is_allowed_host_or_origin(origin) {
+            return Err(StatusCode::FORBIDDEN);
+        }
+    }
+
+    if let Some(host) = headers.get("host").and_then(|v| v.to_str().ok()) {
+        if !is_allowed_host_or_origin(host) {
+            return Err(StatusCode::FORBIDDEN);
+        }
+    }
+
+    Ok(next.run(request).await)
+}
+
 pub async fn run_http_server(ctx: AppContext, port: u16) -> Result<()> {
     let app = Router::new()
         .route("/mcp", post(mcp_post))
         .route("/health", get(health))
-        .layer(CorsLayer::permissive())
+        .layer(axum::middleware::from_fn(validate_local_headers))
         .with_state(ctx);
 
     let addr = format!("127.0.0.1:{}", port);

@@ -13,16 +13,29 @@ use tokio_tungstenite::tungstenite::Message;
 use tracing::{debug, info, warn};
 
 use crate::db::Db;
-use crate::models::{DiscordChannel, DiscordGuild, DiscordMessage, DiscordUser, DmChannel};
+use crate::models::{
+    DiscordChannel, DiscordGuild, DiscordMessage, DiscordUser, DmChannel, PartialDiscordMessage,
+};
 
 const DEFAULT_BASE_URL: &str = "https://discord.com/api/v10";
 const GATEWAY_URL: &str = "wss://gateway.discord.gg/?v=10&encoding=json";
 const BROWSER_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36";
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Bucket {
     pub remaining: i64,
-    pub reset_after_ms: i64,
+    pub reset_at_ms: i64,
+}
+
+pub fn compute_bucket_wait_ms(bucket: &mut Bucket, now_ms: i64) -> u64 {
+    if bucket.remaining <= 0 && bucket.reset_at_ms > now_ms {
+        let wait_ms = (bucket.reset_at_ms - now_ms) as u64;
+        bucket.remaining = 1;
+        bucket.reset_at_ms = 0;
+        wait_ms
+    } else {
+        0
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -200,17 +213,19 @@ impl DiscordClient {
 
             {
                 let mut rl = self.rate_limits.lock().await;
-                if let Some(bucket) = rl.get_mut(&route_key) {
-                    if bucket.remaining <= 0 && bucket.reset_after_ms > 0 {
-                        let wait_ms = bucket.reset_after_ms as u64;
-                        debug!(
-                            "Route rate limit for {} exceeded, waiting {}ms",
-                            route_key, wait_ms
-                        );
-                        tokio::time::sleep(Duration::from_millis(wait_ms)).await;
-                        bucket.remaining = 1;
-                        bucket.reset_after_ms = 0;
-                    }
+                let wait_ms = if let Some(bucket) = rl.get_mut(&route_key) {
+                    compute_bucket_wait_ms(bucket, chrono::Utc::now().timestamp_millis())
+                } else {
+                    0
+                };
+                drop(rl);
+
+                if wait_ms > 0 {
+                    debug!(
+                        "Route rate limit for {} exceeded, waiting {}ms",
+                        route_key, wait_ms
+                    );
+                    tokio::time::sleep(Duration::from_millis(wait_ms)).await;
                 }
             }
 
@@ -255,8 +270,8 @@ impl DiscordClient {
                 .unwrap_or(false);
 
             if let (Some(rem), Some(reset_ms)) = (rem_header, reset_after_header) {
+                let target_ms = chrono::Utc::now().timestamp_millis() + reset_ms;
                 if is_global {
-                    let target_ms = chrono::Utc::now().timestamp_millis() + reset_ms;
                     self.global_reset_ms.store(target_ms, Ordering::SeqCst);
                 } else {
                     let mut rl = self.rate_limits.lock().await;
@@ -264,7 +279,7 @@ impl DiscordClient {
                         route_key.clone(),
                         Bucket {
                             remaining: rem,
-                            reset_after_ms: reset_ms,
+                            reset_at_ms: target_ms,
                         },
                     );
                 }
@@ -286,6 +301,21 @@ impl DiscordClient {
                 } else {
                     1000
                 };
+
+                let target_reset_ms = chrono::Utc::now().timestamp_millis() + sleep_ms as i64;
+                if is_global {
+                    self.global_reset_ms
+                        .store(target_reset_ms, Ordering::SeqCst);
+                } else {
+                    let mut rl = self.rate_limits.lock().await;
+                    rl.insert(
+                        route_key.clone(),
+                        Bucket {
+                            remaining: 0,
+                            reset_at_ms: 0, // Cleared because we sleep right now
+                        },
+                    );
+                }
 
                 warn!(
                     "Rate limited (429) on {}, sleeping {}ms (attempt {}/{})",
@@ -343,7 +373,9 @@ impl DiscordClient {
             let _ = self.db.upsert_guild(g);
         }
 
-        let _ = self.db.prune_guilds_not_in(&ids);
+        if !ids.is_empty() {
+            let _ = self.db.prune_guilds_not_in(&ids);
+        }
         Ok(guilds)
     }
 
@@ -401,27 +433,37 @@ impl DiscordClient {
                 }
             } else if kind == 3 {
                 // Group DM
-                let mut rec_user = None;
+                let channel_name = item
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty());
+
+                let mut first_rec_user = None;
                 if let Some(recipients) = item.get("recipients").and_then(|v| v.as_array()) {
                     if let Some(rec_val) = recipients.first() {
-                        rec_user = serde_json::from_value::<DiscordUser>(rec_val.clone()).ok();
+                        first_rec_user =
+                            serde_json::from_value::<DiscordUser>(rec_val.clone()).ok();
                     }
                 }
 
-                let final_rec = rec_user.unwrap_or_else(|| {
-                    let dm_name = item
-                        .get("name")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("Group DM")
-                        .to_string();
+                let final_rec = if let Some(name) = channel_name {
                     DiscordUser {
                         id: id.clone(),
-                        username: dm_name,
+                        username: name,
                         global_name: None,
                         discriminator: None,
                         avatar: None,
                     }
-                });
+                } else {
+                    first_rec_user.unwrap_or_else(|| DiscordUser {
+                        id: id.clone(),
+                        username: "Group DM".to_string(),
+                        global_name: None,
+                        discriminator: None,
+                        avatar: None,
+                    })
+                };
 
                 let dm = DmChannel {
                     id: id.clone(),
@@ -614,7 +656,9 @@ impl DiscordClient {
         while !self.shutdown.load(Ordering::SeqCst) {
             let ws_endpoint = resume_gateway_url.as_deref().unwrap_or(GATEWAY_URL);
 
-            let connect_url = if ws_endpoint.contains('?') {
+            let connect_url = if ws_endpoint.contains("v=10") {
+                ws_endpoint.to_string()
+            } else if ws_endpoint.contains('?') {
                 format!("{}&v=10&encoding=json", ws_endpoint)
             } else {
                 format!("{}/?v=10&encoding=json", ws_endpoint.trim_end_matches('/'))
@@ -981,8 +1025,16 @@ impl DiscordClient {
                 }
             }
 
-            "MESSAGE_CREATE" | "MESSAGE_UPDATE" => {
+            "MESSAGE_CREATE" => {
                 if let Ok(msg) = serde_json::from_value::<DiscordMessage>(data) {
+                    let _ = self.db.upsert_message(&msg);
+                }
+            }
+
+            "MESSAGE_UPDATE" => {
+                if let Ok(partial) = serde_json::from_value::<PartialDiscordMessage>(data.clone()) {
+                    let _ = self.db.update_partial_message(&partial);
+                } else if let Ok(msg) = serde_json::from_value::<DiscordMessage>(data) {
                     let _ = self.db.upsert_message(&msg);
                 }
             }

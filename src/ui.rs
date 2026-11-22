@@ -6,7 +6,6 @@ use tracing::{error, info};
 use crate::app_state::AppState;
 use crate::config;
 use crate::discord::DiscordClient;
-use crate::mcp::AppContext;
 use crate::token;
 
 pub struct SettingsApp {
@@ -50,21 +49,15 @@ impl eframe::App for SettingsApp {
             }
         }
 
-        // Close request handling: intercept close and hide window instead of exiting
-        if ctx.input(|i| i.viewport().close_requested()) {
-            ctx.send_viewport_cmd(ViewportCommand::CancelClose);
-            ctx.send_viewport_cmd(ViewportCommand::Visible(false));
-        }
-
-        // Update status text from shared state
-        if let Ok(guard) = self.state.status.try_lock() {
-            self.status_text = guard.clone();
-        }
-
-        // Check if shutdown was requested externally
+        // Close request handling: check shutdown first, then intercept close and hide window
         if self.state.is_shutdown() {
             ctx.send_viewport_cmd(ViewportCommand::Close);
             return;
+        }
+
+        if ctx.input(|i| i.viewport().close_requested()) {
+            ctx.send_viewport_cmd(ViewportCommand::CancelClose);
+            ctx.send_viewport_cmd(ViewportCommand::Visible(false));
         }
 
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -143,11 +136,10 @@ impl eframe::App for SettingsApp {
 
                                     // Replace or update AppContext
                                     {
-                                        let mut ctx_lock = state_clone.ctx.lock().await;
-                                        *ctx_lock = Some(AppContext {
-                                            db: Arc::clone(&state_clone.db),
-                                            client: Arc::clone(&new_client),
-                                        });
+                                        let ctx_lock = state_clone.ctx.lock().await;
+                                        if let Some(ref mcp_ctx) = *ctx_lock {
+                                            mcp_ctx.set_client(Some(Arc::clone(&new_client))).await;
+                                        }
                                     }
 
                                     // Update token present flag

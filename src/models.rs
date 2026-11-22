@@ -66,3 +66,22 @@ pub struct DiscordMessage {
     #[serde(default)]
     pub referenced_message: Option<Box<DiscordMessage>>,
 }
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct PartialDiscordMessage {
+    pub id: String,
+    #[serde(default)]
+    pub channel_id: Option<String>,
+    #[serde(default)]
+    pub author: Option<DiscordUser>,
+    #[serde(default)]
+    pub content: Option<String>,
+    #[serde(default)]
+    pub timestamp: Option<String>,
+    #[serde(default)]
+    pub edited_timestamp: Option<String>,
+    #[serde(default)]
+    pub attachments: Option<Vec<Attachment>>,
+    #[serde(default)]
+    pub referenced_message: Option<Box<DiscordMessage>>,
+}

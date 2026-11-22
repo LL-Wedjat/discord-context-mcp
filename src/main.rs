@@ -97,61 +97,47 @@ fn main() -> Result<()> {
 
     let server_port = config.port;
 
-    // Set initial client and AppContext into AppState, or create placeholder client for MCP server
-    let dummy_token = token_opt.clone().unwrap_or_default();
-    let initial_client = match initial_client {
-        Some(c) => Some(c),
-        None => DiscordClient::new(dummy_token.clone(), Arc::clone(&db))
-            .ok()
-            .map(Arc::new),
-    };
+    // Set initial client and AppContext into AppState, without creating dummy clients with empty tokens
+    let app_ctx = AppContext::new(Arc::clone(&db), initial_client.clone());
 
-    if let Some(ref client) = initial_client {
-        let app_ctx = AppContext {
-            db: Arc::clone(&db),
-            client: Arc::clone(client),
-        };
+    let state_ctx = Arc::clone(&state.ctx);
+    let state_client = Arc::clone(&state.client);
 
-        let state_ctx = Arc::clone(&state.ctx);
-        let state_client = Arc::clone(&state.client);
-        let c_clone = Arc::clone(client);
-
-        tokio_handle.block_on(async {
-            *state_ctx.lock().await = Some(app_ctx.clone());
-            if token_present {
-                *state_client.lock().await = Some(c_clone);
-            }
-        });
-
-        // Spawn HTTP server so MCP is immediately accessible (even before token entered)
-        tokio_handle.spawn(async move {
-            info!("Running HTTP MCP server on port {}", server_port);
-            if let Err(e) = run_http_server(app_ctx, server_port).await {
-                error!("HTTP server encountered error: {}", e);
-            }
-        });
-
-        // Initialize Discord client & start gateway only if token is present
-        if token_present {
-            let c_init = Arc::clone(client);
-            let c_token = token_opt.clone().unwrap_or_default();
-            let state_clone = state.clone();
-
-            tokio_handle.spawn(async move {
-                state_clone.set_status("Connecting to Discord...");
-                match c_init.init().await {
-                    Ok(user) => {
-                        info!("Logged in as {}", user.username);
-                        state_clone.set_status(format!("Connected as {}", user.username));
-                        let _ = c_init.start_gateway(c_token);
-                    }
-                    Err(e) => {
-                        error!("Discord initialization failed: {}", e);
-                        state_clone.set_status(format!("Init error: {}", e));
-                    }
-                }
-            });
+    tokio_handle.block_on(async {
+        *state_ctx.lock().await = Some(app_ctx.clone());
+        if let Some(ref c) = initial_client {
+            *state_client.lock().await = Some(Arc::clone(c));
         }
+    });
+
+    let server_app_ctx = app_ctx.clone();
+    tokio_handle.spawn(async move {
+        info!("Running HTTP MCP server on port {}", server_port);
+        if let Err(e) = run_http_server(server_app_ctx, server_port).await {
+            error!("HTTP server encountered error: {}", e);
+        }
+    });
+
+    // Initialize Discord client & start gateway only if token is present
+    if let (true, Some(ref client)) = (token_present, &initial_client) {
+        let c_init = Arc::clone(client);
+        let c_token = token_opt.clone().unwrap_or_default();
+        let state_clone = state.clone();
+
+        tokio_handle.spawn(async move {
+            state_clone.set_status("Connecting to Discord...");
+            match c_init.init().await {
+                Ok(user) => {
+                    info!("Logged in as {}", user.username);
+                    state_clone.set_status(format!("Connected as {}", user.username));
+                    let _ = c_init.start_gateway(c_token);
+                }
+                Err(e) => {
+                    error!("Discord initialization failed: {}", e);
+                    state_clone.set_status(format!("Init error: {}", e));
+                }
+            }
+        });
     }
 
     // Spawn Tray Action Handler in tokio
@@ -194,11 +180,10 @@ fn main() -> Result<()> {
 
                                 // Update AppContext
                                 {
-                                    let mut ctx_lock = state_tray_handler.ctx.lock().await;
-                                    *ctx_lock = Some(AppContext {
-                                        db: Arc::clone(&db_for_reconnect),
-                                        client: Arc::clone(&client),
-                                    });
+                                    let ctx_lock = state_tray_handler.ctx.lock().await;
+                                    if let Some(ref mcp_ctx) = *ctx_lock {
+                                        mcp_ctx.set_client(Some(Arc::clone(&client))).await;
+                                    }
                                 }
 
                                 let c_init = Arc::clone(&client);

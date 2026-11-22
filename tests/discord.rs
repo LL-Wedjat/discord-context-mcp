@@ -1,8 +1,38 @@
 use discord_context_mcp::db::Db;
 use discord_context_mcp::discord::{
-    base64_encode, make_super_properties, normalize_route_key, DiscordClient, SyncReport,
+    base64_encode, compute_bucket_wait_ms, make_super_properties, normalize_route_key, Bucket,
+    DiscordClient, SyncReport,
 };
 use std::sync::Arc;
+
+#[test]
+fn test_compute_bucket_wait_ms() {
+    let now = 10000i64;
+
+    // Remaining > 0: no wait
+    let mut b1 = Bucket {
+        remaining: 5,
+        reset_at_ms: now + 5000,
+    };
+    assert_eq!(compute_bucket_wait_ms(&mut b1, now), 0);
+    assert_eq!(b1.remaining, 5);
+
+    // Remaining <= 0, reset_at_ms in future: wait delta, remaining reset to 1
+    let mut b2 = Bucket {
+        remaining: 0,
+        reset_at_ms: now + 3500,
+    };
+    assert_eq!(compute_bucket_wait_ms(&mut b2, now), 3500);
+    assert_eq!(b2.remaining, 1);
+    assert_eq!(b2.reset_at_ms, 0);
+
+    // Remaining <= 0, reset_at_ms in past: no wait
+    let mut b3 = Bucket {
+        remaining: 0,
+        reset_at_ms: now - 1000,
+    };
+    assert_eq!(compute_bucket_wait_ms(&mut b3, now), 0);
+}
 
 #[test]
 fn test_sanitize_redacts_token() {

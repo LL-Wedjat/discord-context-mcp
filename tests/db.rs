@@ -375,3 +375,129 @@ fn test_find_and_list_helpers() {
     assert_eq!(dms.len(), 1);
     assert_eq!(dms[0].recipient.username, "charlie");
 }
+
+#[test]
+fn test_get_messages_invalid_anchor_returns_error() {
+    let tmp = tempdir().unwrap();
+    let db = open_db(tmp.path()).unwrap();
+
+    let res = db.get_messages("c_any", Some(10), Some("non_existent_msg_id"), None);
+    assert!(res.is_err());
+    assert!(res.unwrap_err().to_string().contains("not found in cache"));
+
+    let res_after = db.get_messages("c_any", Some(10), None, Some("non_existent_msg_id"));
+    assert!(res_after.is_err());
+    assert!(res_after
+        .unwrap_err()
+        .to_string()
+        .contains("not found in cache"));
+}
+
+#[test]
+fn test_fts5_order_word_not_mangled() {
+    use discord_context_mcp::db::escape_fts5_query;
+
+    let escaped = escape_fts5_query("order status");
+    assert_eq!(escaped, "\"order\" AND \"status\"");
+
+    let tmp = tempdir().unwrap();
+    let db = open_db(tmp.path()).unwrap();
+
+    let user = DiscordUser {
+        id: "u_order".to_string(),
+        username: "shopper".to_string(),
+        global_name: None,
+        discriminator: None,
+        avatar: None,
+    };
+
+    let msg = DiscordMessage {
+        id: "m_order_1".to_string(),
+        channel_id: "c_order".to_string(),
+        author: user,
+        content: "Your ORDER has been processed successfully".to_string(),
+        timestamp: "2026-11-22T10:00:00Z".to_string(),
+        edited_timestamp: None,
+        attachments: vec![],
+        referenced_message: None,
+    };
+    db.upsert_message(&msg).unwrap();
+
+    let res = db
+        .search_messages("order", &SearchFilters::default())
+        .unwrap();
+    assert_eq!(res.len(), 1);
+    assert_eq!(res[0].id, "m_order_1");
+}
+
+#[test]
+fn test_partial_message_update_and_created_at_preservation() {
+    use discord_context_mcp::models::PartialDiscordMessage;
+
+    let tmp = tempdir().unwrap();
+    let db = open_db(tmp.path()).unwrap();
+
+    let author = DiscordUser {
+        id: "u_msg_update".to_string(),
+        username: "editor".to_string(),
+        global_name: None,
+        discriminator: None,
+        avatar: None,
+    };
+
+    let orig_msg = DiscordMessage {
+        id: "m_update_1".to_string(),
+        channel_id: "c_update".to_string(),
+        author: author.clone(),
+        content: "Original text".to_string(),
+        timestamp: "2026-11-22T12:00:00Z".to_string(),
+        edited_timestamp: None,
+        attachments: vec![],
+        referenced_message: None,
+    };
+    db.upsert_message(&orig_msg).unwrap();
+
+    let messages = db.get_messages("c_update", None, None, None).unwrap();
+    assert_eq!(messages.len(), 1);
+    let orig_created_at = messages[0].created_at_ms;
+
+    // Partial update from Gateway (only content and edited_timestamp, no author/timestamp)
+    let partial = PartialDiscordMessage {
+        id: "m_update_1".to_string(),
+        channel_id: None,
+        author: None,
+        content: Some("Edited text via partial update".to_string()),
+        timestamp: None,
+        edited_timestamp: Some("2026-11-22T12:05:00Z".to_string()),
+        attachments: None,
+        referenced_message: None,
+    };
+    db.update_partial_message(&partial).unwrap();
+
+    let updated = db.get_messages("c_update", None, None, None).unwrap();
+    assert_eq!(updated.len(), 1);
+    assert_eq!(updated[0].content, "Edited text via partial update");
+    assert_eq!(
+        updated[0].edited_timestamp,
+        Some("2026-11-22T12:05:00Z".to_string())
+    );
+    assert_eq!(updated[0].created_at_ms, orig_created_at);
+    assert_eq!(updated[0].author_username, Some("editor".to_string()));
+
+    // Test upsert_message ON CONFLICT preserves original created_at_ms
+    let duplicate_upsert = DiscordMessage {
+        id: "m_update_1".to_string(),
+        channel_id: "c_update".to_string(),
+        author: author.clone(),
+        content: "Duplicate upsert with synthetic timestamp".to_string(),
+        timestamp: "2026-11-22T13:00:00Z".to_string(),
+        edited_timestamp: Some("2026-11-22T13:00:00Z".to_string()),
+        attachments: vec![],
+        referenced_message: None,
+    };
+    db.upsert_message(&duplicate_upsert).unwrap();
+
+    let after_dup = db.get_messages("c_update", None, None, None).unwrap();
+    assert_eq!(after_dup.len(), 1);
+    assert_eq!(after_dup[0].created_at_ms, orig_created_at);
+}
