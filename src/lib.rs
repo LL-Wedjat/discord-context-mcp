@@ -1,6 +1,7 @@
 pub mod config;
 pub mod db;
 pub mod discord;
+pub mod mcp;
 pub mod models;
 pub mod token;
 
