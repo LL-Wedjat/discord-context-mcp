@@ -1,0 +1,40 @@
+[package]
+name = "discord-context-mcp"
+version = "1.0.0"
+edition = "2021"
+
+[[bin]]
+name = "discord-context-mcp"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1.43", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+thiserror = "2.0"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
+futures-util = "0.3"
+rusqlite = { version = "0.33", features = ["bundled", "bundled-full"] }
+keyring = "3.6"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+dirs = "6.0"
+axum = "0.8"
+tower-http = { version = "0.6", features = ["cors"] }
+url = "2.5"
+chrono = { version = "0.4", features = ["serde"] }
+async-trait = "0.1"
+tokio-util = "0.7"
+once_cell = "1.20"
+
+[dev-dependencies]
+tempfile = "3.17"
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
+panic = "abort"
