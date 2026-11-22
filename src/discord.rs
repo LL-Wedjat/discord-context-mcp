@@ -209,8 +209,8 @@ impl DiscordClient {
             }
 
             {
-                let mut rl = self.rate_limits.lock().await;
-                let wait_ms = if let Some(bucket) = rl.get_mut(&route_key) {
+                let rl = self.rate_limits.lock().await;
+                let wait_ms = if let Some(bucket) = rl.get(&route_key) {
                     compute_bucket_wait_ms(bucket, chrono::Utc::now().timestamp_millis())
                 } else {
                     0

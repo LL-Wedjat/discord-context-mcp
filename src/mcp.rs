@@ -910,7 +910,10 @@ pub fn is_allowed_host_or_origin(val: &str) -> bool {
         let host_inner = &s[1..close_bracket];
         let rest = &s[close_bracket + 1..];
         if !rest.is_empty() {
-            if !rest.starts_with(':') || !rest[1..].chars().all(|c| c.is_ascii_digit()) {
+            if !rest.starts_with(':')
+                || rest[1..].is_empty()
+                || !rest[1..].chars().all(|c| c.is_ascii_digit())
+            {
                 return false;
             }
         }
@@ -920,7 +923,7 @@ pub fn is_allowed_host_or_origin(val: &str) -> bool {
     } else {
         match s.split_once(':') {
             Some((h, port)) => {
-                if !port.chars().all(|c| c.is_ascii_digit()) {
+                if port.is_empty() || !port.chars().all(|c| c.is_ascii_digit()) {
                     return false;
                 }
                 h

@@ -270,6 +270,9 @@ fn test_is_allowed_host_or_origin() {
     assert!(is_allowed_host_or_origin("localhost.:3774"));
 
     // Rejected cases (DNS rebinding / prefix bypass attempts)
+    assert!(!is_allowed_host_or_origin("localhost:"));
+    assert!(!is_allowed_host_or_origin("127.0.0.1:"));
+    assert!(!is_allowed_host_or_origin("[::1]:"));
     assert!(!is_allowed_host_or_origin("localhost.evil.com"));
     assert!(!is_allowed_host_or_origin("127.0.0.1.evil.com"));
     assert!(!is_allowed_host_or_origin("http://localhost.evil.com"));

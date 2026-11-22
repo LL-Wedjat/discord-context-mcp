@@ -176,7 +176,13 @@ impl eframe::App for SettingsApp {
 
                 if self.is_saving {
                     ui.spinner();
-                    if !self.status_text.contains("Validating") {
+                    let still_validating = self
+                        .state
+                        .status
+                        .try_lock()
+                        .map(|g| g.contains("Validating"))
+                        .unwrap_or(false);
+                    if !still_validating {
                         self.is_saving = false;
                     }
                 }
