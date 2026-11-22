@@ -48,6 +48,14 @@ fn main() -> Result<()> {
 
     let _log_guard = init_tracing(&config.log_dir).context("Failed to initialize logging")?;
     info!("Starting Discord Context MCP server");
+    info!(
+        "Discord gateway is {} by user setting",
+        if config.gateway_enabled {
+            "ENABLED"
+        } else {
+            "DISABLED"
+        }
+    );
 
     let db = open_db(&config.data_dir).context("Failed to open local database")?;
     let db = Arc::new(db);
@@ -99,6 +107,7 @@ fn main() -> Result<()> {
     };
 
     let server_port = config.port;
+    let gateway_enabled = config.gateway_enabled;
 
     // Set initial client and AppContext into AppState, without creating dummy clients with empty tokens
     let app_ctx = AppContext::new(Arc::clone(&db), initial_client.clone());
@@ -133,7 +142,9 @@ fn main() -> Result<()> {
                 Ok(user) => {
                     info!("Logged in as {}", user.username);
                     state_clone.set_status(format!("Connected as {}", user.username));
-                    let _ = c_init.start_gateway(c_token);
+                    if gateway_enabled {
+                        let _ = c_init.start_gateway(c_token);
+                    }
                 }
                 Err(e) => {
                     error!("Discord initialization failed: {}", e);
@@ -199,7 +210,9 @@ fn main() -> Result<()> {
                                                 "Connected as {}",
                                                 user.username
                                             ));
-                                            let _ = c_init.start_gateway(tok);
+                                            if gateway_enabled {
+                                                let _ = c_init.start_gateway(tok);
+                                            }
                                         }
                                         Err(e) => {
                                             state_c.set_status(format!("Reconnect failed: {}", e));

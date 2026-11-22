@@ -14,6 +14,7 @@ pub struct SettingsApp {
     pub token_input: String,
     pub status_text: String,
     pub autostart_toggle: bool,
+    pub gateway_toggle: bool,
     pub is_saving: bool,
 }
 
@@ -31,11 +32,14 @@ impl SettingsApp {
             .map(|g| g.clone())
             .unwrap_or_else(|_| "Ready".to_string());
 
+        let initial_gateway = state.config.gateway_enabled;
+
         Self {
             state,
             token_input: String::new(),
             status_text: initial_status,
             autostart_toggle: initial_autostart,
+            gateway_toggle: initial_gateway,
             is_saving: false,
         }
     }
@@ -217,6 +221,35 @@ impl eframe::App for SettingsApp {
                             "Autostart disabled"
                         });
                     }
+                });
+            }
+
+            // Gateway Checkbox
+            if ui
+                .checkbox(
+                    &mut self.gateway_toggle,
+                    "Enable live gateway (higher detection risk)",
+                )
+                .changed()
+            {
+                let enabled = self.gateway_toggle;
+                let data_dir = self.state.config.data_dir.clone();
+                let state_clone = self.state.clone();
+                let repaint_ctx = ctx.clone();
+
+                self.state.tokio_handle.spawn(async move {
+                    match config::save_gateway(&data_dir, enabled) {
+                        Ok(()) => {
+                            info!("Gateway preference updated: {}", enabled);
+                            state_clone
+                                .set_status("Gateway preference saved — restart the app to apply");
+                        }
+                        Err(e) => {
+                            error!("Failed to save gateway setting: {}", e);
+                            state_clone.set_status(format!("Gateway save error: {}", e));
+                        }
+                    }
+                    repaint_ctx.request_repaint();
                 });
             }
 

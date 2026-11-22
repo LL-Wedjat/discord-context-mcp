@@ -1,7 +1,8 @@
 use discord_context_mcp::db::Db;
 use discord_context_mcp::discord::{
-    base64_encode, compute_bucket_wait_ms, make_super_properties, normalize_route_key, Bucket,
-    DiscordClient, SyncReport,
+    base64_encode, build_rest_headers, compute_bucket_wait_ms, make_super_properties,
+    normalize_route_key, parse_search_response, rate_limit_delay_ms, Bucket, DiscordClient,
+    SyncReport, USER_AGENT,
 };
 use std::sync::Arc;
 
@@ -121,4 +122,70 @@ fn test_base64_encode_and_super_properties() {
 
     let sp = make_super_properties();
     assert!(!sp.is_empty());
+}
+
+#[test]
+fn test_build_rest_headers_has_no_client_spoofing() {
+    let headers = build_rest_headers().unwrap();
+
+    // REST headers must not carry browser client spoofing properties.
+    assert!(headers.get("x-super-properties").is_none());
+
+    // The User-Agent must identify this client honestly, not masquerade as a browser.
+    let ua = headers
+        .get("user-agent")
+        .expect("REST headers should include a User-Agent")
+        .to_str()
+        .unwrap();
+    assert!(!ua.contains("Mozilla"));
+    assert_eq!(ua, USER_AGENT);
+}
+
+#[test]
+fn test_parse_search_response_flattens_results() {
+    let fixture = serde_json::json!({
+        "total_results": 1,
+        "messages": [[
+            {
+                "id": "1",
+                "channel_id": "2",
+                "author": {
+                    "id": "3",
+                    "username": "u"
+                },
+                "content": "hi",
+                "timestamp": "2026-01-01T00:00:00Z"
+            }
+        ]]
+    });
+
+    let messages = parse_search_response(&fixture).unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].id, "1");
+    assert_eq!(messages[0].content, "hi");
+}
+
+#[test]
+fn test_parse_search_response_missing_messages_is_empty() {
+    let fixture = serde_json::json!({
+        "total_results": 0
+    });
+
+    let messages = parse_search_response(&fixture).unwrap();
+    assert!(messages.is_empty());
+}
+
+#[test]
+fn test_rate_limit_delay_ms() {
+    // retry_after is in seconds and gets the 1000ms buffer: 0.5s -> 1500ms.
+    assert_eq!(rate_limit_delay_ms(Some(0.5), None), 1500);
+
+    // Large retry_after values are capped at 60 seconds.
+    assert_eq!(rate_limit_delay_ms(Some(600.0), None), 60_000);
+
+    // No headers at all: the buffer alone provides a 1000ms fallback.
+    assert_eq!(rate_limit_delay_ms(None, None), 1000);
+
+    // reset_after (milliseconds) is used when retry_after is absent.
+    assert_eq!(rate_limit_delay_ms(None, Some(2000)), 3000);
 }

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use discord_context_mcp::db::{Db, MessageRow};
 use discord_context_mcp::discord::DiscordClient;
 use discord_context_mcp::mcp::{
-    call_tool, format_items, format_messages, tool_definitions, AppContext,
+    call_tool, format_items, format_live_messages, format_messages, tool_definitions, AppContext,
 };
 use serde_json::json;
 
@@ -61,6 +61,41 @@ fn test_format_messages() {
     assert!(formatted.contains("Alice Smith (u1): Hello world!"));
     assert!(formatted.contains("  ↳ [Attachment: screenshot.png](https://cdn.discordapp.com/attachments/test/screenshot.png)"));
     assert!(formatted.contains("bob (u2): Second message (edited)"));
+}
+
+#[test]
+fn test_format_live_messages_includes_author_and_content() {
+    use discord_context_mcp::models::{Attachment, DiscordMessage, DiscordUser};
+
+    let msgs = vec![DiscordMessage {
+        id: "m1".to_string(),
+        channel_id: "c1".to_string(),
+        author: DiscordUser {
+            id: "u1".to_string(),
+            username: "alice".to_string(),
+            global_name: Some("Alice Smith".to_string()),
+            discriminator: None,
+            avatar: None,
+        },
+        content: "live search hit".to_string(),
+        timestamp: "2026-01-01T00:00:00Z".to_string(),
+        edited_timestamp: None,
+        attachments: vec![Attachment {
+            id: "a1".to_string(),
+            filename: "pic.png".to_string(),
+            url: "https://example.com/pic.png".to_string(),
+            proxy_url: None,
+        }],
+        referenced_message: None,
+    }];
+
+    let formatted = format_live_messages(&msgs, "Live");
+    assert!(formatted.starts_with("# Live (1)\n\n"));
+    assert!(formatted.contains("[2026-01-01T00:00:00Z] Alice Smith (u1): live search hit"));
+    assert!(formatted.contains("  ↳ [Attachment: pic.png](https://example.com/pic.png)"));
+
+    let empty = format_live_messages(&[], "Live");
+    assert_eq!(empty, "# Live (0)\n\n_No messages found._");
 }
 
 #[test]

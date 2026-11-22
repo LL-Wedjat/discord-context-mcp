@@ -13,11 +13,16 @@ const REG_RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Settings {
     pub autostart: bool,
+    #[serde(default)]
+    pub gateway: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { autostart: false }
+        Self {
+            autostart: false,
+            gateway: false,
+        }
     }
 }
 
@@ -27,6 +32,7 @@ pub struct Config {
     pub log_dir: PathBuf,
     pub port: u16,
     pub autostart: bool,
+    pub gateway_enabled: bool,
 }
 
 pub fn load_config() -> Result<Config> {
@@ -48,12 +54,14 @@ pub fn load_config() -> Result<Config> {
         .unwrap_or(DEFAULT_PORT);
 
     let autostart = load_autostart(&data_dir);
+    let gateway_enabled = load_gateway(&data_dir);
 
     Ok(Config {
         data_dir,
         log_dir,
         port,
         autostart,
+        gateway_enabled,
     })
 }
 
@@ -67,9 +75,36 @@ pub fn load_autostart(data_dir: &Path) -> bool {
     false
 }
 
+pub fn load_gateway(data_dir: &Path) -> bool {
+    let settings_file = data_dir.join("settings.json");
+    if let Ok(content) = fs::read_to_string(&settings_file) {
+        if let Ok(settings) = serde_json::from_str::<Settings>(&content) {
+            return settings.gateway;
+        }
+    }
+    false
+}
+
+pub fn save_gateway(data_dir: &Path, enabled: bool) -> Result<()> {
+    let settings_file = data_dir.join("settings.json");
+    let mut settings: Settings = fs::read_to_string(&settings_file)
+        .ok()
+        .and_then(|content| serde_json::from_str::<Settings>(&content).ok())
+        .unwrap_or_default();
+    settings.gateway = enabled;
+    let json = serde_json::to_string_pretty(&settings)?;
+    fs::write(&settings_file, json)
+        .with_context(|| format!("Failed to save settings to {}", settings_file.display()))?;
+    Ok(())
+}
+
 pub fn save_autostart(data_dir: &Path, enabled: bool) -> Result<()> {
     let settings_file = data_dir.join("settings.json");
-    let settings = Settings { autostart: enabled };
+    let mut settings: Settings = fs::read_to_string(&settings_file)
+        .ok()
+        .and_then(|content| serde_json::from_str::<Settings>(&content).ok())
+        .unwrap_or_default();
+    settings.autostart = enabled;
     let json = serde_json::to_string_pretty(&settings)?;
     fs::write(&settings_file, json)
         .with_context(|| format!("Failed to save settings to {}", settings_file.display()))?;
