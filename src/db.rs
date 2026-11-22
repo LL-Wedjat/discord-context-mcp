@@ -267,6 +267,12 @@ impl Db {
         Ok(())
     }
 
+    pub fn delete_message(&self, id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM messages WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
     pub fn upsert_message(&self, message: &DiscordMessage) -> Result<()> {
         self.upsert_user(&message.author)?;
         let conn = self.conn.lock().unwrap();
