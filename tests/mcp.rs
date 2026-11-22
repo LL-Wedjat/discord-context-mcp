@@ -1234,3 +1234,51 @@ async fn test_search_messages_person_dm_empty_live_scopes_cache_to_dm() {
         text
     );
 }
+
+#[tokio::test]
+async fn test_ping() {
+    let db = Arc::new(Db::new_in_memory().expect("in-memory db failed"));
+    let ctx = AppContext::new(db, None);
+
+    // Request with integer id
+    let req = json!({
+        "jsonrpc": "2.0",
+        "id": 123,
+        "method": "ping"
+    });
+    let resp = discord_context_mcp::mcp::mcp_post(
+        axum::extract::State(ctx.clone()),
+        axum::body::Bytes::from(serde_json::to_vec(&req).unwrap()),
+    )
+    .await;
+    assert_eq!(resp.status(), axum::http::StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["jsonrpc"], "2.0");
+    assert_eq!(body["id"], 123);
+    assert_eq!(body["result"], json!({}));
+    assert!(body.get("error").is_none());
+
+    // Explicit id: null ping request
+    let null_req = json!({
+        "jsonrpc": "2.0",
+        "id": null,
+        "method": "ping"
+    });
+    let null_resp = discord_context_mcp::mcp::mcp_post(
+        axum::extract::State(ctx.clone()),
+        axum::body::Bytes::from(serde_json::to_vec(&null_req).unwrap()),
+    )
+    .await;
+    assert_eq!(null_resp.status(), axum::http::StatusCode::OK);
+    let null_bytes = axum::body::to_bytes(null_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let null_body: serde_json::Value = serde_json::from_slice(&null_bytes).unwrap();
+    assert_eq!(null_body["jsonrpc"], "2.0");
+    assert_eq!(null_body["id"], serde_json::Value::Null);
+    assert_eq!(null_body["result"], json!({}));
+    assert!(null_body.get("error").is_none());
+}

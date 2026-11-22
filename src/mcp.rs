@@ -295,7 +295,7 @@ pub fn tool_definitions() -> Vec<Value> {
         json!({
             "name": "search_messages",
             "title": "Search Messages",
-            "description": "Searches message contents using full-text search with optional server, channel, or person filters.",
+            "description": "Searches message contents with optional server, channel, or person filters. With 'person' and no server/channel filter, searches your DM with that person (cached DM channel).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -313,7 +313,7 @@ pub fn tool_definitions() -> Vec<Value> {
                     },
                     "person": {
                         "type": "string",
-                        "description": "Optional user ID, username, or display name filter"
+                        "description": "Optional user ID, username, or display name filter; with no server/channel filter, scopes to your DM with that person."
                     },
                     "limit": {
                         "type": "integer",
@@ -899,9 +899,6 @@ pub async fn call_tool(
                                 if let Some(note) = refresh_note {
                                     formatted.push_str(&note);
                                 }
-                                if let Some(note) = fallback_note {
-                                    formatted.push_str(&note);
-                                }
                                 if let Some(note) = truncation_note {
                                     formatted.push_str(&note);
                                 }
@@ -1148,6 +1145,12 @@ pub async fn mcp_post(
             }))
             .into_response()
         }
+        "ping" => Json(json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": {}
+        }))
+        .into_response(),
         _ => Json(json!({
             "jsonrpc": "2.0",
             "id": id,

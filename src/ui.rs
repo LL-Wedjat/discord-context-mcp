@@ -32,10 +32,7 @@ impl SettingsApp {
             .map(|g| g.clone())
             .unwrap_or_else(|_| "Ready".to_string());
 
-        let initial_gateway = config::load_gateway(&state.config.data_dir);
-        state
-            .gateway_enabled
-            .store(initial_gateway, Ordering::SeqCst);
+        let initial_gateway = state.gateway_enabled.load(Ordering::SeqCst);
 
         Self {
             state,
