@@ -4,7 +4,7 @@ use std::sync::Arc;
 use eframe::egui::{self, Color32, RichText, ViewportCommand};
 use tracing::{error, info};
 
-use crate::app_state::AppState;
+use crate::app_state::{AppState, TrayAction};
 use crate::config;
 use crate::discord::DiscordClient;
 use crate::token;
@@ -228,6 +228,16 @@ impl eframe::App for SettingsApp {
                     ctx.send_viewport_cmd(ViewportCommand::Visible(false));
                 }
 
+                let reconnect_enabled = !self.status_text.contains("Reconnecting");
+                if ui
+                    .add_enabled(reconnect_enabled, egui::Button::new("Reconnect"))
+                    .clicked()
+                {
+                    if let Some(ref tx) = self.state.action_tx {
+                        let _ = tx.send(TrayAction::Reconnect);
+                    }
+                }
+
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button("Quit App").clicked() {
                         self.state.trigger_shutdown();
@@ -256,6 +266,7 @@ pub fn run_ui(state: AppState) -> eframe::Result<()> {
         "Discord Context MCP",
         native_options,
         Box::new(|cc| {
+            *state.repaint_signal.blocking_lock() = Some(cc.egui_ctx.clone());
             cc.egui_ctx.set_visuals(egui::Visuals::dark());
             Ok(Box::new(SettingsApp::new(state)))
         }),
