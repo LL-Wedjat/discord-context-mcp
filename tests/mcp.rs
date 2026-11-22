@@ -160,13 +160,13 @@ async fn test_http_jsonrpc_flow() {
     let echo_resp: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(echo_resp["result"]["protocolVersion"], "2025-03-26");
 
-    // Test notifications/initialized returns 204
+    // Test notifications/initialized returns 202
     let notif_req = json!({
         "jsonrpc": "2.0",
         "method": "notifications/initialized"
     });
     let notif_resp = mcp_post(State(ctx.clone()), Json(notif_req)).await;
-    assert_eq!(notif_resp.status(), axum::http::StatusCode::NO_CONTENT);
+    assert_eq!(notif_resp.status(), axum::http::StatusCode::ACCEPTED);
 
     // Test tools/list
     let list_req = json!({
@@ -249,4 +249,114 @@ async fn test_swappable_client_observed_by_call_tool() {
             e
         );
     }
+}
+
+#[test]
+fn test_is_allowed_host_or_origin() {
+    use discord_context_mcp::mcp::is_allowed_host_or_origin;
+
+    // Accepted cases
+    assert!(is_allowed_host_or_origin("127.0.0.1:3774"));
+    assert!(is_allowed_host_or_origin("localhost:3774"));
+    assert!(is_allowed_host_or_origin("[::1]:3774"));
+    assert!(is_allowed_host_or_origin("127.0.0.1"));
+    assert!(is_allowed_host_or_origin("localhost"));
+    assert!(is_allowed_host_or_origin("::1"));
+    assert!(is_allowed_host_or_origin("http://localhost:3774"));
+    assert!(is_allowed_host_or_origin("http://127.0.0.1:3774"));
+    assert!(is_allowed_host_or_origin("http://[::1]:3774"));
+    assert!(is_allowed_host_or_origin("https://localhost/path"));
+    assert!(is_allowed_host_or_origin("localhost."));
+    assert!(is_allowed_host_or_origin("localhost.:3774"));
+
+    // Rejected cases (DNS rebinding / prefix bypass attempts)
+    assert!(!is_allowed_host_or_origin("localhost.evil.com"));
+    assert!(!is_allowed_host_or_origin("127.0.0.1.evil.com"));
+    assert!(!is_allowed_host_or_origin("http://localhost.evil.com"));
+    assert!(!is_allowed_host_or_origin("http://127.0.0.1.evil.com:3774"));
+    assert!(!is_allowed_host_or_origin(
+        "http://localhost.attacker.com:3774"
+    ));
+    assert!(!is_allowed_host_or_origin("attacker-localhost:3774"));
+    assert!(!is_allowed_host_or_origin("evil-127.0.0.1"));
+    assert!(!is_allowed_host_or_origin("example.com"));
+    assert!(!is_allowed_host_or_origin("[::2]:3774"));
+    assert!(!is_allowed_host_or_origin("[2001:db8::1]:3774"));
+}
+
+#[tokio::test]
+async fn test_validate_local_headers_middleware() {
+    use axum::middleware;
+    use axum::routing::get;
+    use axum::Router;
+    use discord_context_mcp::mcp::validate_local_headers;
+
+    let app = Router::new()
+        .route("/health", get(|| async { "ok" }))
+        .layer(middleware::from_fn(validate_local_headers));
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let client = reqwest::Client::new();
+    let url = format!("http://{}/health", addr);
+
+    // Accepted request with valid host
+    let resp = client
+        .get(&url)
+        .header("host", format!("127.0.0.1:{}", addr.port()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+    // Rejected request with malicious host (DNS rebinding)
+    let resp = client
+        .get(&url)
+        .header("host", "localhost.evil.com")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // Rejected request with malicious 127.0.0.1 prefix
+    let resp = client
+        .get(&url)
+        .header("host", "127.0.0.1.evil.com")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // Accepted request with Host localhost (no Origin)
+    let resp = client
+        .get(&url)
+        .header("host", "localhost")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+    // Rejected request with valid host but malicious origin
+    let resp = client
+        .get(&url)
+        .header("host", format!("127.0.0.1:{}", addr.port()))
+        .header("origin", "http://localhost.evil.com")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // Accepted request with valid host and valid origin
+    let resp = client
+        .get(&url)
+        .header("host", format!("127.0.0.1:{}", addr.port()))
+        .header("origin", format!("http://127.0.0.1:{}", addr.port()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
 }

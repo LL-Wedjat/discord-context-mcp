@@ -10,28 +10,40 @@ fn test_compute_bucket_wait_ms() {
     let now = 10000i64;
 
     // Remaining > 0: no wait
-    let mut b1 = Bucket {
+    let b1 = Bucket {
         remaining: 5,
         reset_at_ms: now + 5000,
     };
-    assert_eq!(compute_bucket_wait_ms(&mut b1, now), 0);
+    assert_eq!(compute_bucket_wait_ms(&b1, now), 0);
     assert_eq!(b1.remaining, 5);
 
-    // Remaining <= 0, reset_at_ms in future: wait delta, remaining reset to 1
-    let mut b2 = Bucket {
+    // Remaining <= 0, reset_at_ms in future: wait delta, no mutation
+    let b2 = Bucket {
         remaining: 0,
         reset_at_ms: now + 3500,
     };
-    assert_eq!(compute_bucket_wait_ms(&mut b2, now), 3500);
-    assert_eq!(b2.remaining, 1);
-    assert_eq!(b2.reset_at_ms, 0);
+    assert_eq!(compute_bucket_wait_ms(&b2, now), 3500);
+    assert_eq!(b2.remaining, 0);
+    assert_eq!(b2.reset_at_ms, now + 3500);
 
     // Remaining <= 0, reset_at_ms in past: no wait
-    let mut b3 = Bucket {
+    let b3 = Bucket {
         remaining: 0,
         reset_at_ms: now - 1000,
     };
-    assert_eq!(compute_bucket_wait_ms(&mut b3, now), 0);
+    assert_eq!(compute_bucket_wait_ms(&b3, now), 0);
+    assert_eq!(b3.remaining, 0);
+    assert_eq!(b3.reset_at_ms, now - 1000);
+
+    // Explicit test proving bucket with future reset_at_ms produces positive wait and does not mutate
+    let b_future = Bucket {
+        remaining: 0,
+        reset_at_ms: now + 2500,
+    };
+    let wait = compute_bucket_wait_ms(&b_future, now);
+    assert_eq!(wait, 2500);
+    assert_eq!(b_future.remaining, 0);
+    assert_eq!(b_future.reset_at_ms, now + 2500);
 }
 
 #[test]

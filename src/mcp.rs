@@ -840,8 +840,8 @@ pub async fn mcp_post(
             .into_response()
         }
         "notifications/initialized" => {
-            // Notification: return 204 No Content
-            StatusCode::NO_CONTENT.into_response()
+            // Notification: return 202 Accepted per MCP Streamable HTTP spec
+            StatusCode::ACCEPTED.into_response()
         }
         "tools/list" => {
             let result = json!({
@@ -888,12 +888,49 @@ pub async fn health() -> &'static str {
     "ok"
 }
 
-fn is_allowed_host_or_origin(val: &str) -> bool {
-    let s = val
-        .trim_start_matches("http://")
-        .trim_start_matches("https://");
-    let host = s.split('/').next().unwrap_or(s);
-    host.starts_with("127.0.0.1") || host.starts_with("localhost")
+pub fn is_allowed_host_or_origin(val: &str) -> bool {
+    let mut s = val.trim();
+    if let Some(idx) = s.find("://") {
+        s = &s[idx + 3..];
+    }
+    // Strip path, query, and fragment if present
+    if let Some(idx) = s.find(|c| c == '/' || c == '?' || c == '#') {
+        s = &s[..idx];
+    }
+    // Strip userinfo if present
+    if let Some(idx) = s.rfind('@') {
+        s = &s[idx + 1..];
+    }
+
+    let host = if s.starts_with('[') {
+        let close_bracket = match s.find(']') {
+            Some(idx) => idx,
+            None => return false,
+        };
+        let host_inner = &s[1..close_bracket];
+        let rest = &s[close_bracket + 1..];
+        if !rest.is_empty() {
+            if !rest.starts_with(':') || !rest[1..].chars().all(|c| c.is_ascii_digit()) {
+                return false;
+            }
+        }
+        host_inner
+    } else if s == "::1" {
+        "::1"
+    } else {
+        match s.split_once(':') {
+            Some((h, port)) => {
+                if !port.chars().all(|c| c.is_ascii_digit()) {
+                    return false;
+                }
+                h
+            }
+            None => s,
+        }
+    };
+
+    let host = host.trim_end_matches('.');
+    host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "::1"
 }
 
 pub async fn validate_local_headers(

@@ -276,16 +276,13 @@ impl Db {
     }
 
     pub fn update_partial_message(&self, partial: &PartialDiscordMessage) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
         let now = current_timestamp_ms();
 
         if let Some(ref author) = partial.author {
-            drop(conn);
             self.upsert_user(author)?;
             return self.update_partial_message_fields(partial, now);
         }
 
-        drop(conn);
         self.update_partial_message_fields(partial, now)
     }
 

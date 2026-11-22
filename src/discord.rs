@@ -27,12 +27,9 @@ pub struct Bucket {
     pub reset_at_ms: i64,
 }
 
-pub fn compute_bucket_wait_ms(bucket: &mut Bucket, now_ms: i64) -> u64 {
+pub fn compute_bucket_wait_ms(bucket: &Bucket, now_ms: i64) -> u64 {
     if bucket.remaining <= 0 && bucket.reset_at_ms > now_ms {
-        let wait_ms = (bucket.reset_at_ms - now_ms) as u64;
-        bucket.remaining = 1;
-        bucket.reset_at_ms = 0;
-        wait_ms
+        (bucket.reset_at_ms - now_ms) as u64
     } else {
         0
     }
@@ -312,7 +309,7 @@ impl DiscordClient {
                         route_key.clone(),
                         Bucket {
                             remaining: 0,
-                            reset_at_ms: 0, // Cleared because we sleep right now
+                            reset_at_ms: target_reset_ms,
                         },
                     );
                 }

@@ -55,6 +55,11 @@ impl eframe::App for SettingsApp {
             return;
         }
 
+        // Update status text from shared state
+        if let Ok(guard) = self.state.status.try_lock() {
+            self.status_text = guard.clone();
+        }
+
         if ctx.input(|i| i.viewport().close_requested()) {
             ctx.send_viewport_cmd(ViewportCommand::CancelClose);
             ctx.send_viewport_cmd(ViewportCommand::Visible(false));
