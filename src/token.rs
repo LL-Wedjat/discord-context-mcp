@@ -7,7 +7,6 @@ const USER_NAME: &str = "default";
 pub fn store_token(token: &str) -> Result<()> {
     let entry = Entry::new(SERVICE_NAME, USER_NAME).context("Failed to create keyring entry")?;
 
-    // set_password overwrites any existing credential in place; do not pre-delete (avoids losing a working token on failure).
     entry
         .set_password(token)
         .context("Failed to store token in Windows Credential Manager")?;
