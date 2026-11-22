@@ -70,7 +70,7 @@ fn main() -> Result<()> {
     let tokio_handle = rt.handle().clone();
 
     // Create AppState
-    let state = AppState::new(
+    let mut state = AppState::new(
         config.clone(),
         Arc::clone(&db),
         token_present,
@@ -79,6 +79,7 @@ fn main() -> Result<()> {
 
     // MPSC channel for tray actions
     let (tray_tx, mut tray_rx) = mpsc::unbounded_channel::<TrayAction>();
+    state.action_tx = Some(tray_tx.clone());
 
     // Start background services in tokio runtime if token is present
     let initial_client: Option<Arc<DiscordClient>> = if let Some(ref token) = token_opt {
@@ -151,6 +152,7 @@ fn main() -> Result<()> {
                 TrayAction::OpenSettings => {
                     info!("Tray: OpenSettings requested");
                     if let Some(ctx) = state_tray_handler.repaint_signal.lock().await.as_ref() {
+                        ctx.request_repaint();
                         ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Visible(true));
                         ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Focus);
                     }

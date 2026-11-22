@@ -27,6 +27,7 @@ pub struct AppState {
     pub client: Arc<Mutex<Option<Arc<DiscordClient>>>>,
     pub tokio_handle: tokio::runtime::Handle,
     pub repaint_signal: Arc<Mutex<Option<egui::Context>>>,
+    pub action_tx: Option<tokio::sync::mpsc::UnboundedSender<TrayAction>>,
 }
 
 impl AppState {
@@ -54,6 +55,7 @@ impl AppState {
             client: Arc::new(Mutex::new(None)),
             tokio_handle,
             repaint_signal: Arc::new(Mutex::new(None)),
+            action_tx: None,
         }
     }
 

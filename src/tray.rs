@@ -5,7 +5,7 @@ use anyhow::Result;
 use muda::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::info;
-use tray_icon::{Icon, TrayIconBuilder, TrayIconEvent};
+use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 
 use crate::app_state::{AppState, TrayAction};
 
@@ -102,8 +102,18 @@ pub fn run_tray(state: AppState, event_proxy: UnboundedSender<TrayAction>) -> Re
 
         // Poll tray icon events (double click or click to open)
         while let Ok(event) = tray_channel.try_recv() {
-            if let TrayIconEvent::DoubleClick { .. } = event {
-                let _ = event_proxy.send(TrayAction::OpenSettings);
+            match event {
+                TrayIconEvent::DoubleClick { .. } => {
+                    let _ = event_proxy.send(TrayAction::OpenSettings);
+                }
+                TrayIconEvent::Click {
+                    button: MouseButton::Left,
+                    button_state: MouseButtonState::Up,
+                    ..
+                } => {
+                    let _ = event_proxy.send(TrayAction::OpenSettings);
+                }
+                _ => {}
             }
         }
 
@@ -158,8 +168,18 @@ pub fn run_tray(state: AppState, event_proxy: UnboundedSender<TrayAction>) -> Re
         }
 
         while let Ok(event) = tray_channel.try_recv() {
-            if let TrayIconEvent::DoubleClick { .. } = event {
-                let _ = event_proxy.send(TrayAction::OpenSettings);
+            match event {
+                TrayIconEvent::DoubleClick { .. } => {
+                    let _ = event_proxy.send(TrayAction::OpenSettings);
+                }
+                TrayIconEvent::Click {
+                    button: MouseButton::Left,
+                    button_state: MouseButtonState::Up,
+                    ..
+                } => {
+                    let _ = event_proxy.send(TrayAction::OpenSettings);
+                }
+                _ => {}
             }
         }
 
