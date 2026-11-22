@@ -660,6 +660,10 @@ pub async fn call_tool(
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| "Missing required parameter 'text'".to_string())?;
 
+            if text_arg.trim().is_empty() {
+                return Err("Search text must not be empty".to_string());
+            }
+
             let server_arg = args.get("server").and_then(|v| v.as_str());
             let channel_arg = args.get("channel").and_then(|v| v.as_str());
             let person_arg = args.get("person").and_then(|v| v.as_str());
@@ -825,6 +829,9 @@ pub async fn call_tool(
                 .ok_or_else(|| "No Discord token configured — open Settings".to_string())?;
 
             let scope = args.get("scope").and_then(|v| v.as_str()).unwrap_or("all");
+            if !matches!(scope, "all" | "servers" | "dms") {
+                return Err("Invalid scope; expected all, servers, or dms".to_string());
+            }
 
             let per_channel = args
                 .get("perChannel")

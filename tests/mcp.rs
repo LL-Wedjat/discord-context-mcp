@@ -601,3 +601,96 @@ async fn test_search_messages_unknown_filter_not_dropped() {
         err_msg
     );
 }
+
+#[tokio::test]
+async fn test_search_messages_blank_text_rejected() {
+    let db = Arc::new(Db::new_in_memory().expect("in-memory db failed"));
+    let ctx = AppContext::new(db, None);
+
+    let res = call_tool(
+        &ctx,
+        "search_messages",
+        &json!({
+            "text": "   "
+        }),
+    )
+    .await;
+    assert!(res.is_err());
+    let err_msg = res.unwrap_err();
+    assert_eq!(err_msg, "Search text must not be empty");
+
+    // Also assert through JSON-RPC tools/call that isError and error text are returned
+    let req = json!({
+        "jsonrpc": "2.0",
+        "id": 101,
+        "method": "tools/call",
+        "params": {
+            "name": "search_messages",
+            "arguments": {
+                "text": "   "
+            }
+        }
+    });
+    let resp = discord_context_mcp::mcp::mcp_post(
+        axum::extract::State(ctx),
+        axum::body::Bytes::from(serde_json::to_vec(&req).unwrap()),
+    )
+    .await;
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["id"], 101);
+    assert_eq!(body["result"]["isError"], true);
+    assert_eq!(
+        body["result"]["content"][0]["text"],
+        "Error: Search text must not be empty"
+    );
+}
+
+#[tokio::test]
+async fn test_refresh_invalid_scope_rejected() {
+    let db = Arc::new(Db::new_in_memory().expect("in-memory db failed"));
+    let client = Arc::new(DiscordClient::new("dummy_token".to_string(), db.clone()).unwrap());
+    let ctx = AppContext::new(db, Some(client));
+
+    let res = call_tool(
+        &ctx,
+        "refresh",
+        &json!({
+            "scope": "invalid_scope"
+        }),
+    )
+    .await;
+    assert!(res.is_err());
+    let err_msg = res.unwrap_err();
+    assert_eq!(err_msg, "Invalid scope; expected all, servers, or dms");
+
+    // Also assert through JSON-RPC tools/call that isError and error text are returned
+    let req = json!({
+        "jsonrpc": "2.0",
+        "id": 102,
+        "method": "tools/call",
+        "params": {
+            "name": "refresh",
+            "arguments": {
+                "scope": "invalid_scope"
+            }
+        }
+    });
+    let resp = discord_context_mcp::mcp::mcp_post(
+        axum::extract::State(ctx),
+        axum::body::Bytes::from(serde_json::to_vec(&req).unwrap()),
+    )
+    .await;
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["id"], 102);
+    assert_eq!(body["result"]["isError"], true);
+    assert_eq!(
+        body["result"]["content"][0]["text"],
+        "Error: Invalid scope; expected all, servers, or dms"
+    );
+}

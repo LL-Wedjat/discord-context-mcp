@@ -1002,7 +1002,6 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tokio-tungstenite",
- "tower-http",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
