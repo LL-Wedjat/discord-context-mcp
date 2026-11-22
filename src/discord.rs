@@ -947,17 +947,57 @@ impl DiscordClient {
                         if let Some(recipients) =
                             ch_val.get("recipients").and_then(|r| r.as_array())
                         {
-                            if let Some(first_rec) = recipients.first() {
-                                if let Ok(u) =
-                                    serde_json::from_value::<DiscordUser>(first_rec.clone())
-                                {
-                                    let dm = DmChannel {
-                                        id,
-                                        recipient: u,
-                                        kind,
-                                    };
-                                    let _ = self.db.upsert_dm_channel(&dm);
+                            if kind == 1 {
+                                if let Some(first_rec) = recipients.first() {
+                                    if let Ok(u) =
+                                        serde_json::from_value::<DiscordUser>(first_rec.clone())
+                                    {
+                                        let dm = DmChannel {
+                                            id,
+                                            recipient: u,
+                                            kind: 1,
+                                        };
+                                        let _ = self.db.upsert_dm_channel(&dm);
+                                    }
                                 }
+                            } else if kind == 3 {
+                                let channel_name = ch_val
+                                    .get("name")
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.trim().to_string())
+                                    .filter(|s| !s.is_empty());
+
+                                let mut first_rec_user = None;
+                                if let Some(first_rec) = recipients.first() {
+                                    first_rec_user =
+                                        serde_json::from_value::<DiscordUser>(first_rec.clone())
+                                            .ok();
+                                }
+
+                                let final_rec = if let Some(name) = channel_name {
+                                    DiscordUser {
+                                        id: id.clone(),
+                                        username: name,
+                                        global_name: None,
+                                        discriminator: None,
+                                        avatar: None,
+                                    }
+                                } else {
+                                    first_rec_user.unwrap_or_else(|| DiscordUser {
+                                        id: id.clone(),
+                                        username: "Group DM".to_string(),
+                                        global_name: None,
+                                        discriminator: None,
+                                        avatar: None,
+                                    })
+                                };
+
+                                let dm = DmChannel {
+                                    id,
+                                    recipient: final_rec,
+                                    kind: 3,
+                                };
+                                let _ = self.db.upsert_dm_channel(&dm);
                             }
                         }
                     }

@@ -668,28 +668,6 @@ pub async fn call_tool(
                 .and_then(|v| v.as_u64())
                 .map(|v| v.clamp(1, 100) as usize);
 
-            let guild_id = if let Some(s) = server_arg {
-                ctx.db.find_guild(s).ok().flatten().map(|g| g.id)
-            } else {
-                None
-            };
-
-            let channel_id = if let Some(ch) = channel_arg {
-                if let Some(ref g_id) = guild_id {
-                    ctx.db.find_channel(g_id, ch).ok().flatten().map(|c| c.id)
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-
-            let author_id = if let Some(p) = person_arg {
-                ctx.db.find_user(p).ok().flatten().map(|u| u.id)
-            } else {
-                None
-            };
-
             let stats = ctx
                 .db
                 .stats()
@@ -706,6 +684,67 @@ pub async fn call_tool(
                     }
                 }
             }
+
+            let guild_id = if let Some(s) = server_arg {
+                let found = ctx
+                    .db
+                    .find_guild(s)
+                    .map_err(|e| sanitize_err(client_ref, &e.to_string()))?;
+                match found {
+                    Some(g) => Some(g.id),
+                    None => {
+                        return Err(format!(
+                            "Server not found: '{}'. Use list_servers to see available servers.",
+                            s
+                        ))
+                    }
+                }
+            } else {
+                None
+            };
+
+            let channel_id = if let Some(ch) = channel_arg {
+                if let Some(ref g_id) = guild_id {
+                    let found = ctx
+                        .db
+                        .find_channel(g_id, ch)
+                        .map_err(|e| sanitize_err(client_ref, &e.to_string()))?;
+                    match found {
+                        Some(c) => Some(c.id),
+                        None => {
+                            return Err(format!(
+                                "Channel not found: '{}' in server. Use list_channels to see available channels.",
+                                ch
+                            ))
+                        }
+                    }
+                } else {
+                    return Err(
+                        "Specifying 'channel' filter requires specifying 'server' as well."
+                            .to_string(),
+                    );
+                }
+            } else {
+                None
+            };
+
+            let author_id = if let Some(p) = person_arg {
+                let found = ctx
+                    .db
+                    .find_user(p)
+                    .map_err(|e| sanitize_err(client_ref, &e.to_string()))?;
+                match found {
+                    Some(u) => Some(u.id),
+                    None => {
+                        return Err(format!(
+                            "User not found: '{}'. Use list_dm_people to see contacts.",
+                            p
+                        ))
+                    }
+                }
+            } else {
+                None
+            };
 
             let filters = SearchFilters {
                 channel_id,
@@ -805,10 +844,44 @@ pub async fn call_tool(
 
 pub async fn mcp_post(
     State(ctx): State<AppContext>,
-    Json(req): Json<Value>,
+    body: axum::body::Bytes,
 ) -> axum::response::Response {
+    let req: Value = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(_) => {
+            return Json(json!({
+                "jsonrpc": "2.0",
+                "id": Value::Null,
+                "error": {
+                    "code": -32700,
+                    "message": "Parse error"
+                }
+            }))
+            .into_response();
+        }
+    };
+
     let id = req.get("id").cloned();
+
+    // JSON-RPC 2.0 conformance: validate jsonrpc field
+    if req.get("jsonrpc").and_then(|v| v.as_str()) != Some("2.0") {
+        return Json(json!({
+            "jsonrpc": "2.0",
+            "id": id.unwrap_or(Value::Null),
+            "error": {
+                "code": -32600,
+                "message": "Invalid Request"
+            }
+        }))
+        .into_response();
+    }
+
     let method = req.get("method").and_then(|v| v.as_str()).unwrap_or("");
+
+    // Any notification starting with "notifications/" returns 202 Accepted with no body
+    if method.starts_with("notifications/") {
+        return StatusCode::ACCEPTED.into_response();
+    }
 
     match method {
         "initialize" => {
@@ -838,10 +911,6 @@ pub async fn mcp_post(
                 "result": result
             }))
             .into_response()
-        }
-        "notifications/initialized" => {
-            // Notification: return 202 Accepted per MCP Streamable HTTP spec
-            StatusCode::ACCEPTED.into_response()
         }
         "tools/list" => {
             let result = json!({

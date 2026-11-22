@@ -121,7 +121,6 @@ async fn test_call_tool_cache_stats() {
 #[tokio::test]
 async fn test_http_jsonrpc_flow() {
     use axum::extract::State;
-    use axum::Json;
     use discord_context_mcp::mcp::mcp_post;
 
     let db = Arc::new(Db::new_in_memory().expect("in-memory db failed"));
@@ -135,7 +134,11 @@ async fn test_http_jsonrpc_flow() {
         "method": "initialize",
         "params": {}
     });
-    let resp = mcp_post(State(ctx.clone()), Json(init_req)).await;
+    let resp = mcp_post(
+        State(ctx.clone()),
+        axum::body::Bytes::from(serde_json::to_vec(&init_req).unwrap()),
+    )
+    .await;
     let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
         .await
         .unwrap();
@@ -153,7 +156,11 @@ async fn test_http_jsonrpc_flow() {
             "protocolVersion": "2025-03-26"
         }
     });
-    let resp = mcp_post(State(ctx.clone()), Json(init_echo_req)).await;
+    let resp = mcp_post(
+        State(ctx.clone()),
+        axum::body::Bytes::from(serde_json::to_vec(&init_echo_req).unwrap()),
+    )
+    .await;
     let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
         .await
         .unwrap();
@@ -165,8 +172,28 @@ async fn test_http_jsonrpc_flow() {
         "jsonrpc": "2.0",
         "method": "notifications/initialized"
     });
-    let notif_resp = mcp_post(State(ctx.clone()), Json(notif_req)).await;
+    let notif_resp = mcp_post(
+        State(ctx.clone()),
+        axum::body::Bytes::from(serde_json::to_vec(&notif_req).unwrap()),
+    )
+    .await;
     assert_eq!(notif_resp.status(), axum::http::StatusCode::ACCEPTED);
+
+    // Test unknown notification (starts with notifications/) returns 202
+    let unknown_notif_req = json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/custom_event",
+        "params": {}
+    });
+    let unknown_notif_resp = mcp_post(
+        State(ctx.clone()),
+        axum::body::Bytes::from(serde_json::to_vec(&unknown_notif_req).unwrap()),
+    )
+    .await;
+    assert_eq!(
+        unknown_notif_resp.status(),
+        axum::http::StatusCode::ACCEPTED
+    );
 
     // Test tools/list
     let list_req = json!({
@@ -175,7 +202,11 @@ async fn test_http_jsonrpc_flow() {
         "method": "tools/list",
         "params": {}
     });
-    let resp = mcp_post(State(ctx.clone()), Json(list_req)).await;
+    let resp = mcp_post(
+        State(ctx.clone()),
+        axum::body::Bytes::from(serde_json::to_vec(&list_req).unwrap()),
+    )
+    .await;
     let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
         .await
         .unwrap();
@@ -194,7 +225,11 @@ async fn test_http_jsonrpc_flow() {
             "arguments": {}
         }
     });
-    let resp = mcp_post(State(ctx.clone()), Json(call_req)).await;
+    let resp = mcp_post(
+        State(ctx.clone()),
+        axum::body::Bytes::from(serde_json::to_vec(&call_req).unwrap()),
+    )
+    .await;
     let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
         .await
         .unwrap();
@@ -211,13 +246,45 @@ async fn test_http_jsonrpc_flow() {
         "id": 4,
         "method": "non_existent_method"
     });
-    let resp = mcp_post(State(ctx.clone()), Json(bad_req)).await;
+    let resp = mcp_post(
+        State(ctx.clone()),
+        axum::body::Bytes::from(serde_json::to_vec(&bad_req).unwrap()),
+    )
+    .await;
     let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
         .await
         .unwrap();
     let bad_resp: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(bad_resp["id"], 4);
     assert_eq!(bad_resp["error"]["code"], -32601);
+
+    // Test missing/wrong jsonrpc field -> -32600 Invalid Request
+    let invalid_rpc_req = json!({
+        "id": 5,
+        "method": "tools/list"
+    });
+    let resp = mcp_post(
+        State(ctx.clone()),
+        axum::body::Bytes::from(serde_json::to_vec(&invalid_rpc_req).unwrap()),
+    )
+    .await;
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let inv_resp: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(inv_resp["id"], 5);
+    assert_eq!(inv_resp["error"]["code"], -32600);
+    assert_eq!(inv_resp["error"]["message"], "Invalid Request");
+
+    // Test malformed JSON -> -32700 Parse error
+    let malformed_bytes = axum::body::Bytes::from("{ this is not valid json }");
+    let resp = mcp_post(State(ctx.clone()), malformed_bytes).await;
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let parse_err_resp: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(parse_err_resp["error"]["code"], -32700);
+    assert_eq!(parse_err_resp["error"]["message"], "Parse error");
 }
 
 #[tokio::test]
@@ -362,4 +429,91 @@ async fn test_validate_local_headers_middleware() {
         .await
         .unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_search_messages_unknown_filter_not_dropped() {
+    use discord_context_mcp::models::{DiscordChannel, DiscordGuild, DiscordMessage, DiscordUser};
+
+    let db = Arc::new(Db::new_in_memory().expect("in-memory db failed"));
+    let user = DiscordUser {
+        id: "u123".to_string(),
+        username: "alice".to_string(),
+        global_name: Some("Alice".to_string()),
+        discriminator: None,
+        avatar: None,
+    };
+    db.upsert_user(&user).unwrap();
+
+    let guild = DiscordGuild {
+        id: "g123".to_string(),
+        name: "Rust Guild".to_string(),
+        icon: None,
+    };
+    db.upsert_guild(&guild).unwrap();
+
+    let ch = DiscordChannel {
+        id: "c123".to_string(),
+        guild_id: Some("g123".to_string()),
+        name: "general".to_string(),
+        kind: 0,
+        topic: None,
+        parent_id: None,
+    };
+    db.upsert_channel(&ch).unwrap();
+
+    let msg = DiscordMessage {
+        id: "m123".to_string(),
+        channel_id: "c123".to_string(),
+        author: user.clone(),
+        content: "hello world from alice".to_string(),
+        timestamp: "2026-01-01T00:00:00Z".to_string(),
+        edited_timestamp: None,
+        attachments: vec![],
+        referenced_message: None,
+    };
+    db.upsert_message(&msg).unwrap();
+
+    let ctx = AppContext::new(db, None);
+
+    // 1. Search with matching text without filter -> finds the message
+    let res = call_tool(
+        &ctx,
+        "search_messages",
+        &json!({
+            "text": "hello"
+        }),
+    )
+    .await;
+    assert!(res.is_ok());
+    let formatted = res.unwrap()["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        formatted.contains("hello world from alice"),
+        "expected match"
+    );
+
+    // 2. Search with an unknown person filter -> must return error, NOT drop filter and return all messages
+    let res_unknown = call_tool(
+        &ctx,
+        "search_messages",
+        &json!({
+            "text": "hello",
+            "person": "nonexistent_bob"
+        }),
+    )
+    .await;
+    assert!(
+        res_unknown.is_err(),
+        "search_messages with unknown person must return Err, got: {:?}",
+        res_unknown
+    );
+    let err_msg = res_unknown.unwrap_err();
+    assert!(
+        err_msg.contains("User not found"),
+        "expected 'User not found' error message, got '{}'",
+        err_msg
+    );
 }

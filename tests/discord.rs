@@ -91,6 +91,24 @@ fn test_sync_report_default() {
     assert!(report.errors.is_empty());
 }
 
+#[tokio::test]
+async fn test_app_state_set_status_synchronous_ordering() {
+    use discord_context_mcp::app_state::AppState;
+    use discord_context_mcp::config::Config;
+
+    let db = Arc::new(Db::new_in_memory().unwrap());
+    let handle = tokio::runtime::Handle::current();
+    let state = AppState::new(Config::default(), db, true, handle);
+
+    assert_eq!(*state.status.lock().unwrap(), "Ready");
+    state.set_status("Connecting...");
+    // Immediate synchronous visibility without awaiting any spawned task
+    assert_eq!(*state.status.lock().unwrap(), "Connecting...");
+
+    state.set_status("Connected");
+    assert_eq!(*state.status.lock().unwrap(), "Connected");
+}
+
 #[test]
 fn test_base64_encode_and_super_properties() {
     assert_eq!(base64_encode(b""), "");

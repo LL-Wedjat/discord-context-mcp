@@ -1,5 +1,5 @@
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::Mutex;
 
 use crate::config::Config;
@@ -16,9 +16,10 @@ pub enum TrayAction {
 
 #[derive(Clone)]
 pub struct AppState {
-    pub status: Arc<Mutex<String>>,
+    pub status: Arc<StdMutex<String>>,
     pub token_present: Arc<Mutex<bool>>,
     pub autostart: Arc<Mutex<bool>>,
+    pub validating: Arc<AtomicBool>,
     pub shutdown: Arc<AtomicBool>,
     pub ctx: Arc<Mutex<Option<AppContext>>>,
     pub config: Config,
@@ -42,9 +43,10 @@ impl AppState {
         };
 
         Self {
-            status: Arc::new(Mutex::new(initial_status)),
+            status: Arc::new(StdMutex::new(initial_status)),
             token_present: Arc::new(Mutex::new(token_present)),
             autostart: Arc::new(Mutex::new(config.autostart)),
+            validating: Arc::new(AtomicBool::new(false)),
             shutdown: Arc::new(AtomicBool::new(false)),
             ctx: Arc::new(Mutex::new(None)),
             config,
@@ -57,14 +59,17 @@ impl AppState {
 
     pub fn set_status(&self, status: impl Into<String>) {
         let status_str = status.into();
-        let status_arc = Arc::clone(&self.status);
-        let repaint_arc = Arc::clone(&self.repaint_signal);
+        {
+            let mut guard = self
+                .status
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            *guard = status_str;
+        }
 
+        // Spawn a task only to notify repaint if repaint context is registered
+        let repaint_arc = Arc::clone(&self.repaint_signal);
         self.tokio_handle.spawn(async move {
-            {
-                let mut guard = status_arc.lock().await;
-                *guard = status_str;
-            }
             if let Some(ctx) = repaint_arc.lock().await.as_ref() {
                 ctx.request_repaint();
             }

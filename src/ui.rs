@@ -1,3 +1,4 @@
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use eframe::egui::{self, Color32, RichText, ViewportCommand};
@@ -65,6 +66,9 @@ impl eframe::App for SettingsApp {
             ctx.send_viewport_cmd(ViewportCommand::Visible(false));
         }
 
+        // Update validating state from shared AtomicBool
+        self.is_saving = self.state.validating.load(Ordering::SeqCst);
+
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.vertical_centered(|ui| {
                 ui.heading(RichText::new("Discord Context MCP").strong().size(18.0));
@@ -99,6 +103,7 @@ impl eframe::App for SettingsApp {
                     .add_enabled(save_enabled, egui::Button::new("Save Token"))
                     .clicked()
                 {
+                    self.state.validating.store(true, Ordering::SeqCst);
                     self.is_saving = true;
                     let input_token = self.token_input.trim().to_string();
                     self.token_input.clear();
@@ -126,6 +131,8 @@ impl eframe::App for SettingsApp {
                                         Ok(c) => Arc::new(c),
                                         Err(e) => {
                                             state_clone.set_status(format!("Client error: {}", e));
+                                            state_clone.validating.store(false, Ordering::SeqCst);
+                                            repaint_ctx.request_repaint();
                                             return;
                                         }
                                     };
@@ -170,21 +177,13 @@ impl eframe::App for SettingsApp {
                                 state_clone.set_status(format!("Validation failed: {}", e));
                             }
                         }
+                        state_clone.validating.store(false, Ordering::SeqCst);
                         repaint_ctx.request_repaint();
                     });
                 }
 
                 if self.is_saving {
                     ui.spinner();
-                    let still_validating = self
-                        .state
-                        .status
-                        .try_lock()
-                        .map(|g| g.contains("Validating"))
-                        .unwrap_or(false);
-                    if !still_validating {
-                        self.is_saving = false;
-                    }
                 }
             });
 

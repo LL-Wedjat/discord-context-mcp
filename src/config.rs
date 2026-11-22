@@ -21,7 +21,7 @@ impl Default for Settings {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Config {
     pub data_dir: PathBuf,
     pub log_dir: PathBuf,
