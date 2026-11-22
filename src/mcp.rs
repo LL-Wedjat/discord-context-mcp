@@ -830,16 +830,35 @@ pub async fn call_tool(
                 }
             }
 
+            // A person-only (DM) search can use the live REST API too, but only
+            // when a cached DM channel exists for that user. Without one we fall
+            // back to the local FTS cache below.
+            let mut dm_channel_id: Option<String> = None;
+            if guild_id.is_none() && channel_id.is_none() {
+                if let Some(ref uid) = author_id {
+                    let dms = ctx
+                        .db
+                        .list_dm_people(None)
+                        .map_err(|e| sanitize_err(client_ref, &e.to_string()))?;
+                    dm_channel_id = dms
+                        .iter()
+                        .find(|d| d.recipient.id == *uid)
+                        .map(|d| d.id.clone());
+                }
+            }
+
             // Prefer a live REST search when a client is available and we have
             // a server or channel scope to search within. Fall back to the
             // local SQLite FTS cache otherwise (or if the live search fails).
-            if client_ref.is_some() && (guild_id.is_some() || channel_id.is_some()) {
+            if client_ref.is_some()
+                && (guild_id.is_some() || channel_id.is_some() || dm_channel_id.is_some())
+            {
                 if let Some(c) = client_ref {
                     match c
                         .search_messages(
                             text_arg,
                             guild_id.as_deref(),
-                            channel_id.as_deref(),
+                            channel_id.as_deref().or(dm_channel_id.as_deref()),
                             author_id.as_deref(),
                             limit_arg.unwrap_or(30),
                         )

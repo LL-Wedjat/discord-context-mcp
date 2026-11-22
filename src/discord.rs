@@ -558,10 +558,10 @@ impl DiscordClient {
         author_id: Option<&str>,
         limit: usize,
     ) -> Result<Vec<DiscordMessage>> {
-        let path = if let Some(channel) = channel_id {
-            format!("/channels/{}/messages/search", channel)
+        let (path, guild_search) = if let Some(channel) = channel_id {
+            (format!("/channels/{}/messages/search", channel), false)
         } else if let Some(guild) = guild_id {
-            format!("/guilds/{}/messages/search", guild)
+            (format!("/guilds/{}/messages/search", guild), true)
         } else {
             return Err(anyhow!("search requires a server or channel filter"));
         };
@@ -574,7 +574,7 @@ impl DiscordClient {
         if let Some(author) = author_id {
             query.push(("author_id".to_string(), author.to_string()));
         }
-        if guild_id.is_some() {
+        if guild_search {
             if let Some(channel) = channel_id {
                 query.push(("channel_id".to_string(), channel.to_string()));
             }
@@ -595,7 +595,7 @@ impl DiscordClient {
                         "Search index not available after {} retries for {}",
                         retries, path
                     );
-                    return Ok(Vec::new());
+                    return Err(anyhow!("Discord search index unavailable after retries"));
                 }
                 retries += 1;
                 let retry_after = value

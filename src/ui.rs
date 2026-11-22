@@ -164,12 +164,17 @@ impl eframe::App for SettingsApp {
                                         *tp_lock = true;
                                     }
 
-                                    // Start gateway in background
+                                    // Start the gateway in the background only when the user
+                                    // explicitly enabled it. REST-only is the default and must
+                                    // also apply to this primary token-setup flow.
+                                    let gateway_enabled = state_clone.config.gateway_enabled;
                                     let gw_client = Arc::clone(&new_client);
                                     let gw_token = input_token.clone();
                                     tokio::spawn(async move {
                                         let _ = gw_client.init().await;
-                                        let _ = gw_client.start_gateway(gw_token);
+                                        if gateway_enabled {
+                                            let _ = gw_client.start_gateway(gw_token);
+                                        }
                                     });
 
                                     state_clone

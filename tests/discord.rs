@@ -189,3 +189,48 @@ fn test_rate_limit_delay_ms() {
     // reset_after (milliseconds) is used when retry_after is absent.
     assert_eq!(rate_limit_delay_ms(None, Some(2000)), 3000);
 }
+
+#[tokio::test]
+async fn test_search_messages_persistent_202_returns_err() {
+    // A cold Discord search index answers 202 with code 110000. After the
+    // retry budget is exhausted, search_messages must return Err so callers
+    // (e.g. the MCP tool) can fall back to the local FTS cache and show a note.
+    let app = axum::Router::new().fallback(|| async {
+        (
+            axum::http::StatusCode::ACCEPTED,
+            axum::Json(serde_json::json!({
+                "code": 110000,
+                "message": "Search index unavailable",
+                "retry_after": 0.0
+            })),
+        )
+    });
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let db = Arc::new(Db::new_in_memory().unwrap());
+    let mut client = DiscordClient::new("test-token".to_string(), db).unwrap();
+    client.base = format!("http://{}", addr);
+
+    let result = client
+        .search_messages("hello", None, Some("123456789"), None, 10)
+        .await;
+    server.abort();
+
+    assert!(
+        result.is_err(),
+        "expected Err on persistent 202/110000, got {:?}",
+        result
+    );
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("search index unavailable"),
+        "unexpected error message"
+    );
+}

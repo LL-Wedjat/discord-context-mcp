@@ -10,6 +10,8 @@ const DEFAULT_PORT: u16 = 3774;
 const APP_NAME: &str = "discord-context-mcp";
 const REG_RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
 
+static SETTINGS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Settings {
     pub autostart: bool,
@@ -86,6 +88,9 @@ pub fn load_gateway(data_dir: &Path) -> bool {
 }
 
 pub fn save_gateway(data_dir: &Path, enabled: bool) -> Result<()> {
+    let _guard = SETTINGS_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let settings_file = data_dir.join("settings.json");
     let mut settings: Settings = fs::read_to_string(&settings_file)
         .ok()
@@ -99,6 +104,9 @@ pub fn save_gateway(data_dir: &Path, enabled: bool) -> Result<()> {
 }
 
 pub fn save_autostart(data_dir: &Path, enabled: bool) -> Result<()> {
+    let _guard = SETTINGS_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let settings_file = data_dir.join("settings.json");
     let mut settings: Settings = fs::read_to_string(&settings_file)
         .ok()
