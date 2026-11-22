@@ -38,7 +38,7 @@ jobs:
         shell: powershell
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          INPUT_TAG: ${{ github.event.inputs.tag }}
+          INPUT_TAG: ${{ inputs.tag }}
           REF_NAME: ${{ github.ref_name }}
         run: |
           $inputTag = $env:INPUT_TAG
