@@ -1,0 +1,58 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build and upload, e.g. v1.0.0'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: '1.100.0'
+
+      - name: Run tests
+        run: cargo test
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Upload or create release
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $inputTag = "${{ github.event.inputs.tag }}"
+          $refName = "${{ github.ref_name }}"
+          if ($inputTag -and $inputTag.Trim() -ne "") {
+            $tag = $inputTag.Trim()
+          } else {
+            $tag = $refName
+          }
+
+          Write-Host "Target tag: $tag"
+          $binary = "target/release/discord-context-mcp.exe"
+
+          gh release view $tag
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "Release $tag already exists; uploading asset with --clobber"
+            gh release upload $tag $binary --clobber
+          } else {
+            Write-Host "Release $tag does not exist; creating release"
+            gh release create $tag $binary --title "$tag - first release (Rust)" --notes-file RELEASE_NOTES.md
+          }
