@@ -896,9 +896,6 @@ pub async fn call_tool(
                             } else {
                                 let title = format!("Search: {}", text_arg);
                                 let mut formatted = format_live_messages(&msgs, &title);
-                                if let Some(note) = refresh_note {
-                                    formatted.push_str(&note);
-                                }
                                 if let Some(note) = truncation_note {
                                     formatted.push_str(&note);
                                 }
