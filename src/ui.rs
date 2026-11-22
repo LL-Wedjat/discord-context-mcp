@@ -228,10 +228,14 @@ impl eframe::App for SettingsApp {
                     ctx.send_viewport_cmd(ViewportCommand::Visible(false));
                 }
 
-                if ui.button("Reconnect").clicked() {
-                    self.state.action_tx.as_ref().map(|tx| {
+                let reconnect_enabled = !self.status_text.contains("Reconnecting");
+                if ui
+                    .add_enabled(reconnect_enabled, egui::Button::new("Reconnect"))
+                    .clicked()
+                {
+                    if let Some(ref tx) = self.state.action_tx {
                         let _ = tx.send(TrayAction::Reconnect);
-                    });
+                    }
                 }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
