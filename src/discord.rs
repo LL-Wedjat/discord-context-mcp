@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 use futures_util::{SinkExt, StreamExt};
-use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, USER_AGENT};
+use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, USER_AGENT as USER_AGENT_HEADER};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::Mutex;
@@ -20,6 +20,8 @@ use crate::models::{
 const DEFAULT_BASE_URL: &str = "https://discord.com/api/v10";
 const GATEWAY_URL: &str = "wss://gateway.discord.gg/?v=10&encoding=json";
 const BROWSER_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36";
+pub const USER_AGENT: &str =
+    "discord-context-mcp/1.0 (+https://github.com/LL-Wedjat/discord-context-mcp)";
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Bucket {
@@ -33,6 +35,20 @@ pub fn compute_bucket_wait_ms(bucket: &Bucket, now_ms: i64) -> u64 {
     } else {
         0
     }
+}
+
+/// Compute how long to wait after an HTTP 429 response, in milliseconds.
+///
+/// Prefers `retry_after` (seconds), then falls back to `reset_after`
+/// (milliseconds), then to 0ms. A 1000ms safety buffer is added so we never
+/// retry exactly at the reset boundary, and the result is capped at 60s.
+pub fn rate_limit_delay_ms(retry_after_s: Option<f64>, reset_after_ms: Option<i64>) -> u64 {
+    let base_ms = retry_after_s
+        .map(|s| (s * 1000.0) as i64)
+        .or(reset_after_ms)
+        .unwrap_or(0)
+        .max(0) as u64;
+    base_ms.saturating_add(1000).min(60_000)
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -98,6 +114,17 @@ pub fn make_super_properties() -> String {
     base64_encode(props.to_string().as_bytes())
 }
 
+/// Builds the default headers used for all REST API calls.
+///
+/// REST requests identify the client honestly and do not send browser
+/// client spoofing headers. The gateway still uses `make_super_properties`
+/// for its IDENTIFY payload; that is intentionally left unchanged.
+pub fn build_rest_headers() -> Result<HeaderMap> {
+    let mut headers = HeaderMap::new();
+    headers.insert(USER_AGENT_HEADER, HeaderValue::from_static(USER_AGENT));
+    Ok(headers)
+}
+
 pub fn normalize_route_key(method: &reqwest::Method, path: &str) -> String {
     let parts: Vec<&str> = path.trim_start_matches('/').split('/').collect();
     let mut norm_parts = Vec::with_capacity(parts.len());
@@ -111,6 +138,26 @@ pub fn normalize_route_key(method: &reqwest::Method, path: &str) -> String {
     format!("{}:/{}", method.as_str(), norm_parts.join("/"))
 }
 
+pub fn parse_search_response(value: &serde_json::Value) -> Result<Vec<DiscordMessage>> {
+    let mut messages = Vec::new();
+    let groups = match value.get("messages").and_then(|m| m.as_array()) {
+        Some(groups) => groups,
+        None => return Ok(messages),
+    };
+    for group in groups {
+        let items = match group.as_array() {
+            Some(items) => items,
+            None => continue,
+        };
+        for item in items {
+            let msg: DiscordMessage = serde_json::from_value(item.clone())
+                .context("Failed to deserialize search result message")?;
+            messages.push(msg);
+        }
+    }
+    Ok(messages)
+}
+
 #[derive(Clone)]
 pub struct DiscordClient {
     pub token: String,
@@ -122,17 +169,12 @@ pub struct DiscordClient {
     pub me: Arc<Mutex<Option<DiscordUser>>>,
     pub shutdown: Arc<AtomicBool>,
     pub last_identify: Arc<Mutex<Instant>>,
+    pub rest_semaphore: Arc<tokio::sync::Semaphore>,
 }
 
 impl DiscordClient {
     pub fn new(token: String, db: Arc<Db>) -> Result<Self> {
-        let mut default_headers = HeaderMap::new();
-        default_headers.insert(USER_AGENT, HeaderValue::from_static(BROWSER_USER_AGENT));
-        default_headers.insert(
-            "x-super-properties",
-            HeaderValue::from_str(&make_super_properties())
-                .context("Failed to build super properties header")?,
-        );
+        let default_headers = build_rest_headers()?;
 
         let http = reqwest::Client::builder()
             .default_headers(default_headers)
@@ -150,6 +192,7 @@ impl DiscordClient {
             me: Arc::new(Mutex::new(None)),
             shutdown: Arc::new(AtomicBool::new(false)),
             last_identify: Arc::new(Mutex::new(Instant::now() - Duration::from_secs(10))),
+            rest_semaphore: Arc::new(tokio::sync::Semaphore::new(2)),
         })
     }
 
@@ -191,6 +234,15 @@ impl DiscordClient {
         query: Option<&[(String, String)]>,
         body: Option<&serde_json::Value>,
     ) -> Result<Option<serde_json::Value>> {
+        // Bound concurrent REST calls so bursts of parallel MCP requests
+        // cannot flood Discord's REST API. The permit is held for the whole
+        // call (including retry sleeps) and dropped on every return path.
+        let _permit = self
+            .rest_semaphore
+            .acquire()
+            .await
+            .map_err(|e| anyhow!("REST semaphore closed: {}", e))?;
+
         let route_key = normalize_route_key(&method, path);
         let url_str = format!("{}{}", self.base.trim_end_matches('/'), path);
 
@@ -291,13 +343,7 @@ impl DiscordClient {
                         None
                     };
 
-                let sleep_ms = if let Some(s) = retry_after_s {
-                    (s * 1000.0) as u64
-                } else if let Some(ms) = reset_after_header {
-                    ms.max(0) as u64
-                } else {
-                    1000
-                };
+                let sleep_ms = rate_limit_delay_ms(retry_after_s, reset_after_header);
 
                 let target_reset_ms = chrono::Utc::now().timestamp_millis() + sleep_ms as i64;
                 if is_global {
@@ -504,6 +550,75 @@ impl DiscordClient {
         Ok(messages)
     }
 
+    pub async fn search_messages(
+        &self,
+        text: &str,
+        guild_id: Option<&str>,
+        channel_id: Option<&str>,
+        author_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<DiscordMessage>> {
+        let (path, guild_search) = if let Some(channel) = channel_id {
+            (format!("/channels/{}/messages/search", channel), false)
+        } else if let Some(guild) = guild_id {
+            (format!("/guilds/{}/messages/search", guild), true)
+        } else {
+            return Err(anyhow!("search requires a server or channel filter"));
+        };
+
+        let mut query = vec![
+            ("content".to_string(), text.to_string()),
+            ("limit".to_string(), limit.min(25).to_string()),
+            ("offset".to_string(), "0".to_string()),
+        ];
+        if let Some(author) = author_id {
+            query.push(("author_id".to_string(), author.to_string()));
+        }
+        if guild_search {
+            if let Some(channel) = channel_id {
+                query.push(("channel_id".to_string(), channel.to_string()));
+            }
+        }
+
+        const MAX_RETRIES: usize = 3;
+        let mut retries = 0;
+
+        let val = loop {
+            let resp = self
+                .rest(reqwest::Method::GET, &path, Some(&query), None)
+                .await?;
+            let value = resp.unwrap_or(serde_json::Value::Null);
+
+            if value.get("code").and_then(|c| c.as_i64()) == Some(110000) {
+                if retries >= MAX_RETRIES {
+                    info!(
+                        "Search index not available after {} retries for {}",
+                        retries, path
+                    );
+                    return Err(anyhow!("Discord search index unavailable after retries"));
+                }
+                retries += 1;
+                let retry_after = value
+                    .get("retry_after")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(1.0)
+                    .clamp(0.0, 60.0);
+                tokio::time::sleep(Duration::from_secs_f64(retry_after)).await;
+                continue;
+            }
+
+            break value;
+        };
+
+        let messages = parse_search_response(&val)?;
+        for msg in &messages {
+            let _ = self.db.upsert_user(&msg.author);
+            let _ = self.db.upsert_message(msg);
+        }
+
+        Ok(messages)
+    }
+
     pub async fn sync_recent(
         &self,
         guild_limit: usize,
@@ -585,11 +700,7 @@ impl DiscordClient {
             return Err(anyhow!("Discord token missing"));
         }
 
-        let mut default_headers = HeaderMap::new();
-        default_headers.insert(USER_AGENT, HeaderValue::from_static(BROWSER_USER_AGENT));
-        if let Ok(sp) = HeaderValue::from_str(&make_super_properties()) {
-            default_headers.insert("x-super-properties", sp);
-        }
+        let default_headers = build_rest_headers()?;
 
         let client = reqwest::Client::builder()
             .default_headers(default_headers)

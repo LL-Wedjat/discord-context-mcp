@@ -13,7 +13,7 @@ use tracing::info;
 
 use crate::db::{Db, MessageRow, SearchFilters};
 use crate::discord::DiscordClient;
-use crate::models::{DiscordChannel, DiscordGuild};
+use crate::models::{DiscordChannel, DiscordGuild, DiscordMessage};
 
 #[derive(Clone)]
 pub struct AppContext {
@@ -113,6 +113,44 @@ pub fn format_messages(rows: &[MessageRow], title: &str) -> String {
                     out.push_str(&format!("  ↳ [Attachment: {}]({})\n", filename, url));
                 }
             }
+        }
+    }
+
+    out.trim_end().to_string()
+}
+
+/// Format messages returned from a live Discord REST search. Mirrors the
+/// `format_messages` style but reads directly from `DiscordMessage` values
+/// (which are already cached by the search call) instead of database rows.
+pub fn format_live_messages(msgs: &[DiscordMessage], title: &str) -> String {
+    if msgs.is_empty() {
+        return format!("# {} (0)\n\n_No messages found._", title);
+    }
+
+    let mut out = format!("# {} ({})\n\n", title, msgs.len());
+    for msg in msgs {
+        let display_name = msg
+            .author
+            .global_name
+            .as_deref()
+            .unwrap_or(msg.author.username.as_str());
+
+        let edited = if msg.edited_timestamp.is_some() {
+            " (edited)"
+        } else {
+            ""
+        };
+
+        out.push_str(&format!(
+            "[{}] {} ({}): {}{}\n",
+            msg.timestamp, display_name, msg.author.id, msg.content, edited
+        ));
+
+        for att in &msg.attachments {
+            out.push_str(&format!(
+                "  ↳ [Attachment: {}]({})\n",
+                att.filename, att.url
+            ));
         }
     }
 
@@ -788,6 +826,58 @@ pub async fn call_tool(
                             p,
                             refresh_note.as_deref().unwrap_or("")
                         ))
+                    }
+                }
+            }
+
+            // A person-only (DM) search can use the live REST API too, but only
+            // when a cached DM channel exists for that user. Without one we fall
+            // back to the local FTS cache below.
+            let mut dm_channel_id: Option<String> = None;
+            if guild_id.is_none() && channel_id.is_none() {
+                if let Some(ref uid) = author_id {
+                    let dms = ctx
+                        .db
+                        .list_dm_people(None)
+                        .map_err(|e| sanitize_err(client_ref, &e.to_string()))?;
+                    dm_channel_id = dms
+                        .iter()
+                        .find(|d| d.recipient.id == *uid)
+                        .map(|d| d.id.clone());
+                }
+            }
+
+            // Prefer a live REST search when a client is available and we have
+            // a server or channel scope to search within. Fall back to the
+            // local SQLite FTS cache otherwise (or if the live search fails).
+            if client_ref.is_some()
+                && (guild_id.is_some() || channel_id.is_some() || dm_channel_id.is_some())
+            {
+                if let Some(c) = client_ref {
+                    match c
+                        .search_messages(
+                            text_arg,
+                            guild_id.as_deref(),
+                            channel_id.as_deref().or(dm_channel_id.as_deref()),
+                            author_id.as_deref(),
+                            limit_arg.unwrap_or(30),
+                        )
+                        .await
+                    {
+                        Ok(msgs) => {
+                            let title = format!("Search: {}", text_arg);
+                            let mut formatted = format_live_messages(&msgs, &title);
+                            if let Some(note) = refresh_note {
+                                formatted.push_str(&note);
+                            }
+                            return Ok(text_result(&formatted));
+                        }
+                        Err(e) => {
+                            refresh_note = Some(format!(
+                                "\n\n_Note: live search failed: {}; showing cached results._",
+                                c.sanitize(&e.to_string())
+                            ));
+                        }
                     }
                 }
             }

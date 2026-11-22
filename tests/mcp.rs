@@ -3,7 +3,7 @@ use std::sync::Arc;
 use discord_context_mcp::db::{Db, MessageRow};
 use discord_context_mcp::discord::DiscordClient;
 use discord_context_mcp::mcp::{
-    call_tool, format_items, format_messages, tool_definitions, AppContext,
+    call_tool, format_items, format_live_messages, format_messages, tool_definitions, AppContext,
 };
 use serde_json::json;
 
@@ -61,6 +61,41 @@ fn test_format_messages() {
     assert!(formatted.contains("Alice Smith (u1): Hello world!"));
     assert!(formatted.contains("  ↳ [Attachment: screenshot.png](https://cdn.discordapp.com/attachments/test/screenshot.png)"));
     assert!(formatted.contains("bob (u2): Second message (edited)"));
+}
+
+#[test]
+fn test_format_live_messages_includes_author_and_content() {
+    use discord_context_mcp::models::{Attachment, DiscordMessage, DiscordUser};
+
+    let msgs = vec![DiscordMessage {
+        id: "m1".to_string(),
+        channel_id: "c1".to_string(),
+        author: DiscordUser {
+            id: "u1".to_string(),
+            username: "alice".to_string(),
+            global_name: Some("Alice Smith".to_string()),
+            discriminator: None,
+            avatar: None,
+        },
+        content: "live search hit".to_string(),
+        timestamp: "2026-01-01T00:00:00Z".to_string(),
+        edited_timestamp: None,
+        attachments: vec![Attachment {
+            id: "a1".to_string(),
+            filename: "pic.png".to_string(),
+            url: "https://example.com/pic.png".to_string(),
+            proxy_url: None,
+        }],
+        referenced_message: None,
+    }];
+
+    let formatted = format_live_messages(&msgs, "Live");
+    assert!(formatted.starts_with("# Live (1)\n\n"));
+    assert!(formatted.contains("[2026-01-01T00:00:00Z] Alice Smith (u1): live search hit"));
+    assert!(formatted.contains("  ↳ [Attachment: pic.png](https://example.com/pic.png)"));
+
+    let empty = format_live_messages(&[], "Live");
+    assert_eq!(empty, "# Live (0)\n\n_No messages found._");
 }
 
 #[test]
@@ -692,5 +727,161 @@ async fn test_refresh_invalid_scope_rejected() {
     assert_eq!(
         body["result"]["content"][0]["text"],
         "Error: Invalid scope; expected all, servers, or dms"
+    );
+}
+
+#[tokio::test]
+async fn test_search_messages_person_dm_uses_live_rest_when_dm_cached() {
+    use axum::routing::get;
+    use axum::Json;
+    use axum::Router;
+    use discord_context_mcp::models::{DiscordMessage, DiscordUser, DmChannel};
+
+    let db = Arc::new(Db::new_in_memory().expect("in-memory db failed"));
+    let user = DiscordUser {
+        id: "u_dm".to_string(),
+        username: "diana".to_string(),
+        global_name: Some("Diana".to_string()),
+        discriminator: None,
+        avatar: None,
+    };
+    db.upsert_user(&user).unwrap();
+
+    let dm = DmChannel {
+        id: "dm1".to_string(),
+        recipient: user.clone(),
+        kind: 1,
+    };
+    db.upsert_dm_channel(&dm).unwrap();
+
+    // Seed one cached message so stats.messages > 0 and no sync_recent network call is triggered
+    let seed_msg = DiscordMessage {
+        id: "m_seed".to_string(),
+        channel_id: "dm1".to_string(),
+        author: user.clone(),
+        content: "seed msg".to_string(),
+        timestamp: "2026-01-01T00:00:00Z".to_string(),
+        edited_timestamp: None,
+        attachments: vec![],
+        referenced_message: None,
+    };
+    db.upsert_message(&seed_msg).unwrap();
+
+    let mock_router = Router::new().route(
+        "/channels/dm1/messages/search",
+        get(|| async {
+            Json(json!({
+                "messages": [[
+                    {
+                        "id": "m_live",
+                        "channel_id": "dm1",
+                        "author": {
+                            "id": "u_dm",
+                            "username": "diana",
+                            "global_name": "Diana"
+                        },
+                        "content": "live dm search hit",
+                        "timestamp": "2026-02-01T00:00:00Z",
+                        "attachments": []
+                    }
+                ]]
+            }))
+        }),
+    );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, mock_router).await.unwrap();
+    });
+
+    let mut client = DiscordClient::new("test_token".to_string(), db.clone()).unwrap();
+    client.base = format!("http://{}", addr);
+    let ctx = AppContext::new(db, Some(Arc::new(client)));
+
+    let res = call_tool(
+        &ctx,
+        "search_messages",
+        &json!({
+            "text": "hello",
+            "person": "diana"
+        }),
+    )
+    .await;
+
+    assert!(res.is_ok(), "search_messages failed: {:?}", res);
+    let text = res.unwrap()["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        text.contains("live dm search hit"),
+        "expected live dm search hit in result text: {}",
+        text
+    );
+}
+
+#[tokio::test]
+async fn test_search_messages_person_without_dm_falls_back_to_local_fts() {
+    use axum::routing::any;
+    use axum::Router;
+    use discord_context_mcp::models::{DiscordMessage, DiscordUser};
+
+    let db = Arc::new(Db::new_in_memory().expect("in-memory db failed"));
+    let user = DiscordUser {
+        id: "u_local".to_string(),
+        username: "nobody".to_string(),
+        global_name: Some("Nobody".to_string()),
+        discriminator: None,
+        avatar: None,
+    };
+    db.upsert_user(&user).unwrap();
+
+    let msg = DiscordMessage {
+        id: "m_local".to_string(),
+        channel_id: "c_unknown".to_string(),
+        author: user.clone(),
+        content: "local fts hit".to_string(),
+        timestamp: "2026-01-01T00:00:00Z".to_string(),
+        edited_timestamp: None,
+        attachments: vec![],
+        referenced_message: None,
+    };
+    db.upsert_message(&msg).unwrap();
+    // Do NOT seed a DM channel for that user.
+
+    let mock_router = Router::new().fallback(any(|| async {
+        (axum::http::StatusCode::NOT_FOUND, "not found")
+    }));
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, mock_router).await.unwrap();
+    });
+
+    let mut client = DiscordClient::new("test_token".to_string(), db.clone()).unwrap();
+    client.base = format!("http://{}", addr);
+    let ctx = AppContext::new(db, Some(Arc::new(client)));
+
+    let res = call_tool(
+        &ctx,
+        "search_messages",
+        &json!({
+            "text": "local",
+            "person": "nobody"
+        }),
+    )
+    .await;
+
+    assert!(res.is_ok(), "search_messages failed: {:?}", res);
+    let text = res.unwrap()["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        text.contains("local fts hit"),
+        "expected local fts hit in result text: {}",
+        text
     );
 }
