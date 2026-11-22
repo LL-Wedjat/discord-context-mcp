@@ -918,11 +918,16 @@ pub async fn call_tool(
                 }
             }
 
+            // Local FTS has no 25-result REST cap: use the caller's full limit
+            // here. Only the live REST call above is clamped to `effective_limit`.
+            // For a person-only DM search, scope the fallback to the resolved DM
+            // channel so cached messages from the same author in other servers
+            // cannot leak into the results.
             let filters = SearchFilters {
-                channel_id,
+                channel_id: channel_id.or(dm_channel_id),
                 guild_id,
                 author_id,
-                limit: Some(effective_limit),
+                limit: Some(requested_limit),
             };
 
             let rows = ctx
@@ -932,15 +937,20 @@ pub async fn call_tool(
 
             let title = format!("Search: {}", text_arg);
             let mut formatted = format_messages(&rows, &title);
-            if let Some(note) = refresh_note {
-                formatted.push_str(&note);
+            // "Showing cached ..." notes are only truthful when the cache
+            // actually returned rows; do not claim to be showing results when
+            // it returned nothing.
+            if !rows.is_empty() {
+                if let Some(note) = refresh_note {
+                    formatted.push_str(&note);
+                }
+                if let Some(note) = fallback_note {
+                    formatted.push_str(&note);
+                }
             }
-            if let Some(note) = fallback_note {
-                formatted.push_str(&note);
-            }
-            if let Some(note) = truncation_note {
-                formatted.push_str(&note);
-            }
+            // The "clamped to REST maximum" note is only appended in the live
+            // results branch above. Local FTS uses the caller's full limit, so
+            // the note would be false on the cached fallback path.
             Ok(text_result(&formatted))
         }
 

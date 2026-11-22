@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{FutureExt, SinkExt, StreamExt};
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, USER_AGENT as USER_AGENT_HEADER};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -174,6 +174,9 @@ pub struct DiscordClient {
     pub global_reset_ms: Arc<AtomicI64>,
     pub me: Arc<Mutex<Option<DiscordUser>>>,
     pub shutdown: Arc<AtomicBool>,
+    /// Wakes the gateway task immediately on `stop()`. The `AtomicBool` stays
+    /// as the authoritative state; this only removes the wakeup latency.
+    pub shutdown_notify: Arc<tokio::sync::Notify>,
     pub last_identify: Arc<Mutex<Instant>>,
     pub rest_semaphore: Arc<tokio::sync::Semaphore>,
 }
@@ -197,6 +200,7 @@ impl DiscordClient {
             global_reset_ms: Arc::new(AtomicI64::new(0)),
             me: Arc::new(Mutex::new(None)),
             shutdown: Arc::new(AtomicBool::new(false)),
+            shutdown_notify: Arc::new(tokio::sync::Notify::new()),
             last_identify: Arc::new(Mutex::new(Instant::now() - Duration::from_secs(10))),
             rest_semaphore: Arc::new(tokio::sync::Semaphore::new(2)),
         })
@@ -747,6 +751,27 @@ impl DiscordClient {
 
     pub fn stop(&self) {
         self.shutdown.store(true, Ordering::SeqCst);
+        // Wake any gateway task parked on a socket read, heartbeat tick, or
+        // reconnect backoff so it unwinds now instead of waiting up to a full
+        // heartbeat interval (41s) or backoff (60s), or forever on a half-open
+        // socket.
+        self.shutdown_notify.notify_waiters();
+    }
+
+    /// Sleep for `duration` unless a shutdown is signaled first, in which case
+    /// return `true` immediately. The waiter is force-registered before the
+    /// flag is checked so a concurrent `stop()` cannot lose its wakeup.
+    async fn sleep_or_shutdown(&self, duration: Duration) -> bool {
+        let mut notified = Box::pin(self.shutdown_notify.notified());
+        let _ = (&mut notified).now_or_never();
+        if self.shutdown.load(Ordering::SeqCst) {
+            return true;
+        }
+        tokio::select! {
+            biased;
+            _ = &mut notified => true,
+            _ = tokio::time::sleep(duration) => false,
+        }
     }
 
     pub fn start_gateway(&self, token: String) -> tokio::task::JoinHandle<()> {
@@ -764,7 +789,18 @@ impl DiscordClient {
         let mut resume_gateway_url: Option<String> = None;
         let mut last_sequence: Option<i64> = None;
 
-        while !self.shutdown.load(Ordering::SeqCst) {
+        // Register the shutdown waiter before checking the flag: stop() stores
+        // the flag then calls notify_waiters(), so registering first makes it
+        // impossible to lose the wakeup. Keep the future pinned for the whole
+        // loop and prefer it in every select via `biased`.
+        let mut shutdown = Box::pin(self.shutdown_notify.notified());
+        let _ = (&mut shutdown).now_or_never();
+        if self.shutdown.load(Ordering::SeqCst) {
+            info!("[gateway] Gateway task finished shutdown");
+            return;
+        }
+
+        'outer: while !self.shutdown.load(Ordering::SeqCst) {
             let ws_endpoint = resume_gateway_url.as_deref().unwrap_or(GATEWAY_URL);
 
             let connect_url = if ws_endpoint.contains("v=10") {
@@ -777,7 +813,14 @@ impl DiscordClient {
 
             info!("[gateway] Connecting to gateway...");
 
-            let connect_res = tokio_tungstenite::connect_async(&connect_url).await;
+            let connect_res = tokio::select! {
+                biased;
+                _ = &mut shutdown => {
+                    info!("[gateway] Shutdown requested while connecting");
+                    break 'outer;
+                }
+                res = tokio_tungstenite::connect_async(&connect_url) => res,
+            };
             let (ws_stream, _) = match connect_res {
                 Ok(res) => {
                     info!("[gateway] Connected to Discord Gateway");
@@ -790,7 +833,9 @@ impl DiscordClient {
                         "[gateway] Connection error: {}. Retrying in {:?}...",
                         sanitized, backoff
                     );
-                    tokio::time::sleep(backoff).await;
+                    if self.sleep_or_shutdown(backoff).await {
+                        break 'outer;
+                    }
                     backoff = (backoff * 2).min(max_backoff);
                     continue;
                 }
@@ -806,6 +851,12 @@ impl DiscordClient {
 
             while !self.shutdown.load(Ordering::SeqCst) {
                 tokio::select! {
+                    biased;
+                    _ = &mut shutdown => {
+                        info!("[gateway] Shutdown requested; closing gateway connection");
+                        break 'outer;
+                    }
+
                     _ = heartbeat_timer.tick(), if heartbeat_interval_ms.is_some() => {
                         if !heartbeat_ack_received {
                             warn!("[gateway] Heartbeat ACK not received in time; reconnecting");
@@ -889,7 +940,10 @@ impl DiscordClient {
                                                 let mut last_id = self.last_identify.lock().await;
                                                 let elapsed = last_id.elapsed();
                                                 if elapsed < Duration::from_secs(5) {
-                                                    tokio::time::sleep(Duration::from_secs(5) - elapsed).await;
+                                                    if self.sleep_or_shutdown(Duration::from_secs(5) - elapsed).await {
+                                                        should_reconnect = false;
+                                                        break;
+                                                    }
                                                 }
                                                 *last_id = Instant::now();
                                             }
@@ -964,7 +1018,10 @@ impl DiscordClient {
                                             last_sequence = None;
                                             resume_gateway_url = None;
                                         }
-                                        tokio::time::sleep(Duration::from_secs(4)).await;
+                                        if self.sleep_or_shutdown(Duration::from_secs(4)).await {
+                                            should_reconnect = false;
+                                            break;
+                                        }
                                         should_reconnect = true;
                                         break;
                                     }
@@ -1001,7 +1058,9 @@ impl DiscordClient {
             }
 
             if should_reconnect && !self.shutdown.load(Ordering::SeqCst) {
-                tokio::time::sleep(Duration::from_secs(1)).await;
+                if self.sleep_or_shutdown(Duration::from_secs(1)).await {
+                    break;
+                }
             }
         }
 

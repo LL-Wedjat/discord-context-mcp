@@ -254,6 +254,10 @@ impl eframe::App for SettingsApp {
                                 {
                                     let client_lock = state_clone.client.lock().await;
                                     if let Some(c) = client_lock.as_ref() {
+                                        // stop() sets the shutdown flag and fires the
+                                        // shutdown Notify, so the gateway wakes from
+                                        // any read/backoff immediately. Only report the
+                                        // gateway as disabled after stop() has run.
                                         c.stop();
                                     }
                                 }

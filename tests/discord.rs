@@ -235,6 +235,38 @@ async fn test_search_messages_persistent_202_returns_err() {
     );
 }
 
+#[tokio::test]
+async fn test_stop_wakes_gateway_shutdown_waiter() {
+    use std::sync::atomic::Ordering;
+
+    let db = Arc::new(Db::new_in_memory().unwrap());
+    let client = Arc::new(DiscordClient::new("test-token".to_string(), db).unwrap());
+
+    // Mirror the gateway loop: register the notified future (force a single
+    // poll so the waiter is in Notify's queue) before awaiting it. The oneshot
+    // makes the test deterministic — stop() is only called once registered.
+    let (reg_tx, reg_rx) = tokio::sync::oneshot::channel::<()>();
+    let c = Arc::clone(&client);
+    let waiter = tokio::spawn(async move {
+        let mut notified = Box::pin(c.shutdown_notify.notified());
+        let _ = futures_util::FutureExt::now_or_never(&mut notified);
+        let _ = reg_tx.send(());
+        notified.await;
+        c.shutdown.load(Ordering::SeqCst)
+    });
+
+    reg_rx.await.expect("waiter failed to register");
+    assert!(!client.shutdown.load(Ordering::SeqCst));
+
+    client.stop();
+
+    let shutdown_flag = tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
+        .await
+        .expect("stop() did not wake the shutdown waiter")
+        .expect("waiter task panicked");
+    assert!(shutdown_flag, "shutdown flag should be set after stop()");
+}
+
 #[test]
 fn test_version_strings_use_cargo_package_version() {
     assert!(USER_AGENT.starts_with("discord-context-mcp/"));

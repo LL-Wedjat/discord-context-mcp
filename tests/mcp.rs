@@ -1127,3 +1127,110 @@ async fn test_search_messages_limit_clamp_note() {
         text
     );
 }
+
+#[tokio::test]
+async fn test_search_messages_person_dm_empty_live_scopes_cache_to_dm() {
+    use axum::routing::get;
+    use axum::Json;
+    use axum::Router;
+    use discord_context_mcp::models::{
+        DiscordChannel, DiscordGuild, DiscordMessage, DiscordUser, DmChannel,
+    };
+
+    let db = Arc::new(Db::new_in_memory().expect("in-memory db failed"));
+
+    let user = DiscordUser {
+        id: "u_dm".to_string(),
+        username: "diana".to_string(),
+        global_name: Some("Diana".to_string()),
+        discriminator: None,
+        avatar: None,
+    };
+    db.upsert_user(&user).unwrap();
+
+    let dm = DmChannel {
+        id: "dm1".to_string(),
+        recipient: user.clone(),
+        kind: 1,
+    };
+    db.upsert_dm_channel(&dm).unwrap();
+
+    // A regular guild channel that also holds messages by the same author.
+    let guild = DiscordGuild {
+        id: "g1".to_string(),
+        name: "Guild".to_string(),
+        icon: None,
+    };
+    db.upsert_guild(&guild).unwrap();
+    let guild_channel = DiscordChannel {
+        id: "gchan".to_string(),
+        guild_id: Some("g1".to_string()),
+        name: "general".to_string(),
+        kind: 0,
+        topic: None,
+        parent_id: None,
+    };
+    db.upsert_channel(&guild_channel).unwrap();
+
+    let dm_msg = DiscordMessage {
+        id: "m_in_dm".to_string(),
+        channel_id: "dm1".to_string(),
+        author: user.clone(),
+        content: "needle in dm".to_string(),
+        timestamp: "2026-01-01T00:00:00Z".to_string(),
+        edited_timestamp: None,
+        attachments: vec![],
+        referenced_message: None,
+    };
+    db.upsert_message(&dm_msg).unwrap();
+
+    let guild_msg = DiscordMessage {
+        id: "m_in_guild".to_string(),
+        channel_id: "gchan".to_string(),
+        author: user.clone(),
+        content: "needle in guild".to_string(),
+        timestamp: "2026-01-02T00:00:00Z".to_string(),
+        edited_timestamp: None,
+        attachments: vec![],
+        referenced_message: None,
+    };
+    db.upsert_message(&guild_msg).unwrap();
+
+    // Live REST search for the DM returns no results, forcing the local fallback.
+    let mock_router = Router::new().route(
+        "/channels/dm1/messages/search",
+        get(|| async { Json(json!({ "messages": [] })) }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, mock_router).await.unwrap();
+    });
+
+    let mut client = DiscordClient::new("test_token".to_string(), db.clone()).unwrap();
+    client.base = format!("http://{}", addr);
+    let ctx = AppContext::new(db, Some(Arc::new(client)));
+
+    let res = call_tool(
+        &ctx,
+        "search_messages",
+        &json!({ "text": "needle", "person": "diana" }),
+    )
+    .await;
+
+    assert!(res.is_ok(), "search_messages failed: {:?}", res);
+    let text = res.unwrap()["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        text.contains("needle in dm"),
+        "expected the DM message in fallback results: {}",
+        text
+    );
+    assert!(
+        !text.contains("needle in guild"),
+        "fallback must be scoped to the DM channel, not other servers: {}",
+        text
+    );
+}
