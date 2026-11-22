@@ -67,32 +67,51 @@ fn test_format_messages() {
 fn test_format_live_messages_includes_author_and_content() {
     use discord_context_mcp::models::{Attachment, DiscordMessage, DiscordUser};
 
-    let msgs = vec![DiscordMessage {
-        id: "m1".to_string(),
-        channel_id: "c1".to_string(),
-        author: DiscordUser {
-            id: "u1".to_string(),
-            username: "alice".to_string(),
-            global_name: Some("Alice Smith".to_string()),
-            discriminator: None,
-            avatar: None,
+    let msgs = vec![
+        DiscordMessage {
+            id: "m1".to_string(),
+            channel_id: "c1".to_string(),
+            author: DiscordUser {
+                id: "u1".to_string(),
+                username: "alice".to_string(),
+                global_name: Some("Alice Smith".to_string()),
+                discriminator: None,
+                avatar: None,
+            },
+            content: "live search hit".to_string(),
+            timestamp: "2026-01-01T00:00:00Z".to_string(),
+            edited_timestamp: None,
+            attachments: vec![Attachment {
+                id: "a1".to_string(),
+                filename: "pic.png".to_string(),
+                url: "https://example.com/pic.png".to_string(),
+                proxy_url: None,
+            }],
+            referenced_message: None,
         },
-        content: "live search hit".to_string(),
-        timestamp: "2026-01-01T00:00:00Z".to_string(),
-        edited_timestamp: None,
-        attachments: vec![Attachment {
-            id: "a1".to_string(),
-            filename: "pic.png".to_string(),
-            url: "https://example.com/pic.png".to_string(),
-            proxy_url: None,
-        }],
-        referenced_message: None,
-    }];
+        DiscordMessage {
+            id: "m1".to_string(),
+            channel_id: "c1".to_string(),
+            author: DiscordUser {
+                id: "u1".to_string(),
+                username: "alice".to_string(),
+                global_name: Some("Alice Smith".to_string()),
+                discriminator: None,
+                avatar: None,
+            },
+            content: "duplicate should be skipped".to_string(),
+            timestamp: "2026-01-01T00:00:00Z".to_string(),
+            edited_timestamp: None,
+            attachments: vec![],
+            referenced_message: None,
+        },
+    ];
 
     let formatted = format_live_messages(&msgs, "Live");
     assert!(formatted.starts_with("# Live (1)\n\n"));
-    assert!(formatted.contains("[2026-01-01T00:00:00Z] Alice Smith (u1): live search hit"));
+    assert!(formatted.contains("[2026-01-01T00:00:00Z] [c1] Alice Smith (u1): live search hit"));
     assert!(formatted.contains("  ↳ [Attachment: pic.png](https://example.com/pic.png)"));
+    assert!(!formatted.contains("duplicate should be skipped"));
 
     let empty = format_live_messages(&[], "Live");
     assert_eq!(empty, "# Live (0)\n\n_No messages found._");
@@ -181,6 +200,10 @@ async fn test_http_jsonrpc_flow() {
     assert_eq!(init_resp["id"], 1);
     assert_eq!(init_resp["result"]["protocolVersion"], "2025-06-18");
     assert_eq!(init_resp["result"]["serverInfo"]["name"], "discord-context");
+    assert_eq!(
+        init_resp["result"]["serverInfo"]["version"],
+        env!("CARGO_PKG_VERSION")
+    );
 
     // Test initialize echoing supported version
     let init_echo_req = json!({
@@ -240,8 +263,8 @@ async fn test_http_jsonrpc_flow() {
         "notification body must be empty"
     );
 
-    // Test a request with id: null is also treated as a notification returning 202 with no body
-    let null_id_notif_req = json!({
+    // Test a request with id: null returns normal JSON-RPC response (not treated as notification)
+    let null_id_req = json!({
         "jsonrpc": "2.0",
         "id": null,
         "method": "notifications/custom_event",
@@ -249,14 +272,37 @@ async fn test_http_jsonrpc_flow() {
     });
     let null_id_resp = mcp_post(
         State(ctx.clone()),
-        axum::body::Bytes::from(serde_json::to_vec(&null_id_notif_req).unwrap()),
+        axum::body::Bytes::from(serde_json::to_vec(&null_id_req).unwrap()),
     )
     .await;
-    assert_eq!(null_id_resp.status(), axum::http::StatusCode::ACCEPTED);
+    assert_eq!(null_id_resp.status(), axum::http::StatusCode::OK);
     let null_id_bytes = axum::body::to_bytes(null_id_resp.into_body(), usize::MAX)
         .await
         .unwrap();
-    assert!(null_id_bytes.is_empty());
+    let null_id_res: serde_json::Value = serde_json::from_slice(&null_id_bytes).unwrap();
+    assert_eq!(null_id_res["id"], serde_json::Value::Null);
+    assert_eq!(null_id_res["error"]["code"], -32601);
+
+    let null_id_tools_req = json!({
+        "jsonrpc": "2.0",
+        "id": null,
+        "method": "tools/list",
+        "params": {}
+    });
+    let null_id_tools_resp = mcp_post(
+        State(ctx.clone()),
+        axum::body::Bytes::from(serde_json::to_vec(&null_id_tools_req).unwrap()),
+    )
+    .await;
+    assert_eq!(null_id_tools_resp.status(), axum::http::StatusCode::OK);
+    let null_id_tools_bytes = axum::body::to_bytes(null_id_tools_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let null_id_tools_res: serde_json::Value =
+        serde_json::from_slice(&null_id_tools_bytes).unwrap();
+    assert_eq!(null_id_tools_res["id"], serde_json::Value::Null);
+    let tools = null_id_tools_res["result"]["tools"].as_array().unwrap();
+    assert!(!tools.is_empty());
 
     // Test notifications/foo WITH an id returns normal JSON-RPC response, not 202
     let notif_with_id_req = json!({
@@ -882,6 +928,202 @@ async fn test_search_messages_person_without_dm_falls_back_to_local_fts() {
     assert!(
         text.contains("local fts hit"),
         "expected local fts hit in result text: {}",
+        text
+    );
+}
+
+#[tokio::test]
+async fn test_search_messages_empty_live_result_falls_back_to_cached() {
+    use axum::routing::get;
+    use axum::Json;
+    use axum::Router;
+    use discord_context_mcp::models::{DiscordChannel, DiscordGuild, DiscordMessage, DiscordUser};
+
+    let db = Arc::new(Db::new_in_memory().expect("in-memory db failed"));
+    let user = DiscordUser {
+        id: "u1".to_string(),
+        username: "alice".to_string(),
+        global_name: Some("Alice".to_string()),
+        discriminator: None,
+        avatar: None,
+    };
+    db.upsert_user(&user).unwrap();
+
+    let guild = DiscordGuild {
+        id: "g1".to_string(),
+        name: "Guild 1".to_string(),
+        icon: None,
+    };
+    db.upsert_guild(&guild).unwrap();
+
+    let channel = DiscordChannel {
+        id: "c1".to_string(),
+        guild_id: Some("g1".to_string()),
+        name: "general".to_string(),
+        kind: 0,
+        topic: None,
+        parent_id: None,
+    };
+    db.upsert_channel(&channel).unwrap();
+
+    let cached_msg = DiscordMessage {
+        id: "m_cached".to_string(),
+        channel_id: "c1".to_string(),
+        author: user.clone(),
+        content: "cached only hit".to_string(),
+        timestamp: "2026-01-01T00:00:00Z".to_string(),
+        edited_timestamp: None,
+        attachments: vec![],
+        referenced_message: None,
+    };
+    db.upsert_message(&cached_msg).unwrap();
+
+    let mock_router = Router::new().route(
+        "/channels/c1/messages/search",
+        get(|| async {
+            Json(json!({
+                "messages": []
+            }))
+        }),
+    );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, mock_router).await.unwrap();
+    });
+
+    let mut client = DiscordClient::new("test_token".to_string(), db.clone()).unwrap();
+    client.base = format!("http://{}", addr);
+    let ctx = AppContext::new(db, Some(Arc::new(client)));
+
+    let res = call_tool(
+        &ctx,
+        "search_messages",
+        &json!({
+            "text": "cached",
+            "server": "g1",
+            "channel": "c1"
+        }),
+    )
+    .await;
+
+    assert!(res.is_ok(), "search_messages failed: {:?}", res);
+    let text = res.unwrap()["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        text.contains("cached only hit"),
+        "expected cached only hit in result text: {}",
+        text
+    );
+    assert!(
+        text.contains("cached results"),
+        "expected note containing 'cached results' in result text: {}",
+        text
+    );
+}
+
+#[tokio::test]
+async fn test_search_messages_limit_clamp_note() {
+    use axum::routing::get;
+    use axum::Json;
+    use axum::Router;
+    use discord_context_mcp::models::{DiscordChannel, DiscordGuild, DiscordMessage, DiscordUser};
+
+    let db = Arc::new(Db::new_in_memory().expect("in-memory db failed"));
+    let user = DiscordUser {
+        id: "u1".to_string(),
+        username: "alice".to_string(),
+        global_name: Some("Alice".to_string()),
+        discriminator: None,
+        avatar: None,
+    };
+    db.upsert_user(&user).unwrap();
+
+    let guild = DiscordGuild {
+        id: "g1".to_string(),
+        name: "Guild 1".to_string(),
+        icon: None,
+    };
+    db.upsert_guild(&guild).unwrap();
+
+    let channel = DiscordChannel {
+        id: "c1".to_string(),
+        guild_id: Some("g1".to_string()),
+        name: "general".to_string(),
+        kind: 0,
+        topic: None,
+        parent_id: None,
+    };
+    db.upsert_channel(&channel).unwrap();
+
+    // Seed one message in db so stats.messages > 0
+    let seed_msg = DiscordMessage {
+        id: "m_seed".to_string(),
+        channel_id: "c1".to_string(),
+        author: user.clone(),
+        content: "seed msg".to_string(),
+        timestamp: "2026-01-01T00:00:00Z".to_string(),
+        edited_timestamp: None,
+        attachments: vec![],
+        referenced_message: None,
+    };
+    db.upsert_message(&seed_msg).unwrap();
+
+    let mock_router = Router::new().route(
+        "/channels/c1/messages/search",
+        get(|| async {
+            Json(json!({
+                "messages": [[
+                    {
+                        "id": "m_live",
+                        "channel_id": "c1",
+                        "author": {
+                            "id": "u1",
+                            "username": "alice",
+                            "global_name": "Alice"
+                        },
+                        "content": "hello world",
+                        "timestamp": "2026-02-01T00:00:00Z",
+                        "attachments": []
+                    }
+                ]]
+            }))
+        }),
+    );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, mock_router).await.unwrap();
+    });
+
+    let mut client = DiscordClient::new("test_token".to_string(), db.clone()).unwrap();
+    client.base = format!("http://{}", addr);
+    let ctx = AppContext::new(db, Some(Arc::new(client)));
+
+    let res = call_tool(
+        &ctx,
+        "search_messages",
+        &json!({
+            "text": "hello",
+            "server": "g1",
+            "channel": "c1",
+            "limit": 100
+        }),
+    )
+    .await;
+
+    assert!(res.is_ok(), "search_messages failed: {:?}", res);
+    let text = res.unwrap()["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        text.contains("clamped to 25"),
+        "expected note containing 'clamped to 25' in result text: {}",
         text
     );
 }

@@ -107,7 +107,6 @@ fn main() -> Result<()> {
     };
 
     let server_port = config.port;
-    let gateway_enabled = config.gateway_enabled;
 
     // Set initial client and AppContext into AppState, without creating dummy clients with empty tokens
     let app_ctx = AppContext::new(Arc::clone(&db), initial_client.clone());
@@ -142,7 +141,7 @@ fn main() -> Result<()> {
                 Ok(user) => {
                     info!("Logged in as {}", user.username);
                     state_clone.set_status(format!("Connected as {}", user.username));
-                    if gateway_enabled {
+                    if state_clone.refresh_gateway_enabled() {
                         let _ = c_init.start_gateway(c_token);
                     }
                 }
@@ -210,7 +209,7 @@ fn main() -> Result<()> {
                                                 "Connected as {}",
                                                 user.username
                                             ));
-                                            if gateway_enabled {
+                                            if state_c.refresh_gateway_enabled() {
                                                 let _ = c_init.start_gateway(tok);
                                             }
                                         }

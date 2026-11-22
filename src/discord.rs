@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -20,8 +20,11 @@ use crate::models::{
 const DEFAULT_BASE_URL: &str = "https://discord.com/api/v10";
 const GATEWAY_URL: &str = "wss://gateway.discord.gg/?v=10&encoding=json";
 const BROWSER_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36";
-pub const USER_AGENT: &str =
-    "discord-context-mcp/1.0 (+https://github.com/LL-Wedjat/discord-context-mcp)";
+pub const USER_AGENT: &str = concat!(
+    "discord-context-mcp/",
+    env!("CARGO_PKG_VERSION"),
+    " (+https://github.com/LL-Wedjat/discord-context-mcp)"
+);
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Bucket {
@@ -140,6 +143,7 @@ pub fn normalize_route_key(method: &reqwest::Method, path: &str) -> String {
 
 pub fn parse_search_response(value: &serde_json::Value) -> Result<Vec<DiscordMessage>> {
     let mut messages = Vec::new();
+    let mut seen_ids = HashSet::new();
     let groups = match value.get("messages").and_then(|m| m.as_array()) {
         Some(groups) => groups,
         None => return Ok(messages),
@@ -152,7 +156,9 @@ pub fn parse_search_response(value: &serde_json::Value) -> Result<Vec<DiscordMes
         for item in items {
             let msg: DiscordMessage = serde_json::from_value(item.clone())
                 .context("Failed to deserialize search result message")?;
-            messages.push(msg);
+            if seen_ids.insert(msg.id.clone()) {
+                messages.push(msg);
+            }
         }
     }
     Ok(messages)
@@ -234,15 +240,6 @@ impl DiscordClient {
         query: Option<&[(String, String)]>,
         body: Option<&serde_json::Value>,
     ) -> Result<Option<serde_json::Value>> {
-        // Bound concurrent REST calls so bursts of parallel MCP requests
-        // cannot flood Discord's REST API. The permit is held for the whole
-        // call (including retry sleeps) and dropped on every return path.
-        let _permit = self
-            .rest_semaphore
-            .acquire()
-            .await
-            .map_err(|e| anyhow!("REST semaphore closed: {}", e))?;
-
         let route_key = normalize_route_key(&method, path);
         let url_str = format!("{}{}", self.base.trim_end_matches('/'), path);
 
@@ -250,14 +247,20 @@ impl DiscordClient {
         const MAX_ATTEMPTS: usize = 5;
 
         loop {
-            attempts += 1;
+            let permit = self
+                .rest_semaphore
+                .acquire()
+                .await
+                .map_err(|e| anyhow!("REST semaphore closed: {}", e))?;
 
             let now_ms = chrono::Utc::now().timestamp_millis();
             let global_reset = self.global_reset_ms.load(Ordering::SeqCst);
             if global_reset > now_ms {
                 let sleep_ms = (global_reset - now_ms) as u64;
                 debug!("Global rate limit active, waiting {}ms", sleep_ms);
+                drop(permit);
                 tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
+                continue;
             }
 
             {
@@ -274,9 +277,13 @@ impl DiscordClient {
                         "Route rate limit for {} exceeded, waiting {}ms",
                         route_key, wait_ms
                     );
+                    drop(permit);
                     tokio::time::sleep(Duration::from_millis(wait_ms)).await;
+                    continue;
                 }
             }
+
+            attempts += 1;
 
             let mut req_builder = self
                 .http
@@ -372,6 +379,7 @@ impl DiscordClient {
                     ));
                 }
 
+                drop(permit);
                 tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
                 continue;
             }
@@ -558,10 +566,10 @@ impl DiscordClient {
         author_id: Option<&str>,
         limit: usize,
     ) -> Result<Vec<DiscordMessage>> {
-        let (path, guild_search) = if let Some(channel) = channel_id {
-            (format!("/channels/{}/messages/search", channel), false)
+        let path = if let Some(channel) = channel_id {
+            format!("/channels/{}/messages/search", channel)
         } else if let Some(guild) = guild_id {
-            (format!("/guilds/{}/messages/search", guild), true)
+            format!("/guilds/{}/messages/search", guild)
         } else {
             return Err(anyhow!("search requires a server or channel filter"));
         };
@@ -573,11 +581,6 @@ impl DiscordClient {
         ];
         if let Some(author) = author_id {
             query.push(("author_id".to_string(), author.to_string()));
-        }
-        if guild_search {
-            if let Some(channel) = channel_id {
-                query.push(("channel_id".to_string(), channel.to_string()));
-            }
         }
 
         const MAX_RETRIES: usize = 3;

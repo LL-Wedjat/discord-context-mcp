@@ -62,7 +62,7 @@ The release binary is at `target/release/discord-context-mcp.exe`.
 ## Tray menu
 
 - **Open Settings** — token field, connection status, autostart toggle
-- **Reconnect** — re-establish the Discord gateway connection
+- **Reconnect** — create a fresh Discord session (re-validate the token, refresh the client, and restart the live gateway if enabled)
 - **Quit** — shut down the service
 
 Closing the settings window hides it to the tray; the MCP server keeps running. The **autostart** toggle in Settings controls whether the app launches on Windows login.

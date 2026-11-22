@@ -234,3 +234,174 @@ async fn test_search_messages_persistent_202_returns_err() {
         "unexpected error message"
     );
 }
+
+#[test]
+fn test_version_strings_use_cargo_package_version() {
+    assert!(USER_AGENT.starts_with("discord-context-mcp/"));
+    assert!(USER_AGENT.contains(env!("CARGO_PKG_VERSION")));
+    assert!(include_str!("../Cargo.toml").contains("version = \"1.1.0\""));
+}
+
+#[test]
+fn test_parse_search_response_dedupes_by_id() {
+    let msg_json = serde_json::json!({
+        "id": "dup_123",
+        "channel_id": "c1",
+        "author": {
+            "id": "u1",
+            "username": "tester"
+        },
+        "content": "duplicate message content",
+        "timestamp": "2026-01-01T00:00:00Z"
+    });
+
+    let fixture = serde_json::json!({
+        "total_results": 2,
+        "messages": [
+            [msg_json.clone()],
+            [msg_json]
+        ]
+    });
+
+    let messages = parse_search_response(&fixture).unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].id, "dup_123");
+}
+
+#[tokio::test]
+async fn test_rest_permit_dropped_during_429_backoff() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Instant;
+
+    let hit_count = Arc::new(AtomicUsize::new(0));
+    let hit_count_clone = Arc::clone(&hit_count);
+
+    let app = axum::Router::new()
+        .route(
+            "/channels/slow/messages/search",
+            axum::routing::get(move || {
+                let count = Arc::clone(&hit_count_clone);
+                async move {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    (
+                        axum::http::StatusCode::TOO_MANY_REQUESTS,
+                        axum::Json(serde_json::json!({
+                            "message": "You are being rate limited.",
+                            "retry_after": 2.0
+                        })),
+                    )
+                }
+            }),
+        )
+        .route(
+            "/users/@me",
+            axum::routing::get(|| async {
+                axum::Json(serde_json::json!({
+                    "id": "12345",
+                    "username": "testuser"
+                }))
+            }),
+        );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let db = Arc::new(Db::new_in_memory().unwrap());
+    let mut client = DiscordClient::new("test-token".to_string(), db).unwrap();
+    client.base = format!("http://{}", addr);
+    let client = Arc::new(client);
+
+    let c1 = Arc::clone(&client);
+    let task1 = tokio::spawn(async move {
+        let _ = c1.search_messages("x", None, Some("slow"), None, 5).await;
+    });
+
+    let c2 = Arc::clone(&client);
+    let task2 = tokio::spawn(async move {
+        let _ = c2.search_messages("x", None, Some("slow"), None, 5).await;
+    });
+
+    // Poll counter with 10ms sleeps up to 1s until it reaches 2
+    let poll_start = Instant::now();
+    while hit_count.load(Ordering::SeqCst) < 2 {
+        if poll_start.elapsed() >= std::time::Duration::from_secs(1) {
+            panic!(
+                "Timed out waiting for hit_count to reach 2, was {}",
+                hit_count.load(Ordering::SeqCst)
+            );
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    let init_start = Instant::now();
+    let init_res = client.init().await;
+    let init_duration = init_start.elapsed();
+
+    assert!(
+        init_res.is_ok(),
+        "client.init() failed: {:?}",
+        init_res.err()
+    );
+    assert!(
+        init_duration < std::time::Duration::from_secs(1),
+        "client.init() took {:?}, expected < 1s",
+        init_duration
+    );
+
+    task1.abort();
+    task2.abort();
+    server.abort();
+}
+
+#[tokio::test]
+async fn test_gateway_toggle_reread_from_disk_across_clones() {
+    use discord_context_mcp::app_state::AppState;
+    use discord_context_mcp::config::Config;
+    use std::sync::atomic::Ordering;
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let data_dir = temp_dir.path().to_path_buf();
+    let log_dir = data_dir.join("logs");
+
+    let settings_path = data_dir.join("settings.json");
+    std::fs::write(&settings_path, r#"{"autostart":false,"gateway":true}"#).unwrap();
+
+    let config = Config {
+        data_dir: data_dir.clone(),
+        log_dir,
+        port: 3774,
+        autostart: false,
+        gateway_enabled: false,
+    };
+
+    let db = Arc::new(Db::new_in_memory().unwrap());
+    let handle = tokio::runtime::Handle::current();
+    let state = AppState::new(config, db, true, handle);
+    let state_clone = state.clone();
+
+    // Assert atomic starts false
+    assert!(!state.gateway_enabled.load(Ordering::SeqCst));
+    assert!(!state_clone.gateway_enabled.load(Ordering::SeqCst));
+
+    // refresh returns true and both atomics true
+    let refreshed = state.refresh_gateway_enabled();
+    assert!(refreshed);
+    assert!(state.gateway_enabled.load(Ordering::SeqCst));
+    assert!(state_clone.gateway_enabled.load(Ordering::SeqCst));
+
+    // rewrite settings.json with gateway false
+    std::fs::write(&settings_path, r#"{"autostart":false,"gateway":false}"#).unwrap();
+
+    // refresh returns false and both atomics false
+    let refreshed = state.refresh_gateway_enabled();
+    assert!(!refreshed);
+    assert!(!state.gateway_enabled.load(Ordering::SeqCst));
+    assert!(!state_clone.gateway_enabled.load(Ordering::SeqCst));
+
+    // assert discord_context_mcp::ui::SettingsApp::new(state.clone()).gateway_toggle == false
+    let ui_app = discord_context_mcp::ui::SettingsApp::new(state.clone());
+    assert!(!ui_app.gateway_toggle);
+}

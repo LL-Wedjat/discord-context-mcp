@@ -19,6 +19,7 @@ pub struct AppState {
     pub status: Arc<StdMutex<String>>,
     pub token_present: Arc<Mutex<bool>>,
     pub autostart: Arc<Mutex<bool>>,
+    pub gateway_enabled: Arc<AtomicBool>,
     pub validating: Arc<AtomicBool>,
     pub shutdown: Arc<AtomicBool>,
     pub ctx: Arc<Mutex<Option<AppContext>>>,
@@ -47,6 +48,7 @@ impl AppState {
             status: Arc::new(StdMutex::new(initial_status)),
             token_present: Arc::new(Mutex::new(token_present)),
             autostart: Arc::new(Mutex::new(config.autostart)),
+            gateway_enabled: Arc::new(AtomicBool::new(config.gateway_enabled)),
             validating: Arc::new(AtomicBool::new(false)),
             shutdown: Arc::new(AtomicBool::new(false)),
             ctx: Arc::new(Mutex::new(None)),
@@ -57,6 +59,12 @@ impl AppState {
             repaint_signal: Arc::new(Mutex::new(None)),
             action_tx: None,
         }
+    }
+
+    pub fn refresh_gateway_enabled(&self) -> bool {
+        let persisted = crate::config::load_gateway(&self.config.data_dir);
+        self.gateway_enabled.store(persisted, Ordering::SeqCst);
+        persisted
     }
 
     pub fn set_status(&self, status: impl Into<String>) {

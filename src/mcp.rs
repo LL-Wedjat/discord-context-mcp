@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -127,8 +128,20 @@ pub fn format_live_messages(msgs: &[DiscordMessage], title: &str) -> String {
         return format!("# {} (0)\n\n_No messages found._", title);
     }
 
-    let mut out = format!("# {} ({})\n\n", title, msgs.len());
+    let mut deduped = Vec::new();
+    let mut seen_ids = HashSet::new();
     for msg in msgs {
+        if seen_ids.insert(&msg.id) {
+            deduped.push(msg);
+        }
+    }
+
+    if deduped.is_empty() {
+        return format!("# {} (0)\n\n_No messages found._", title);
+    }
+
+    let mut out = format!("# {} ({})\n\n", title, deduped.len());
+    for msg in deduped {
         let display_name = msg
             .author
             .global_name
@@ -142,8 +155,8 @@ pub fn format_live_messages(msgs: &[DiscordMessage], title: &str) -> String {
         };
 
         out.push_str(&format!(
-            "[{}] {} ({}): {}{}\n",
-            msg.timestamp, display_name, msg.author.id, msg.content, edited
+            "[{}] [{}] {} ({}): {}{}\n",
+            msg.timestamp, msg.channel_id, display_name, msg.author.id, msg.content, edited
         ));
 
         for att in &msg.attachments {
@@ -710,6 +723,16 @@ pub async fn call_tool(
                 .and_then(|v| v.as_u64())
                 .map(|v| v.clamp(1, 100) as usize);
 
+            let requested_limit = limit_arg.unwrap_or(25);
+            const REST_SEARCH_MAX: usize = 25;
+            let effective_limit = requested_limit.min(REST_SEARCH_MAX);
+            let truncation_note: Option<String> = if requested_limit > REST_SEARCH_MAX {
+                Some("\n\n_Note: search limit clamped to 25 (Discord REST maximum)._".to_string())
+            } else {
+                None
+            };
+            let mut fallback_note: Option<String> = None;
+
             let stats = ctx
                 .db
                 .stats()
@@ -860,17 +883,30 @@ pub async fn call_tool(
                             guild_id.as_deref(),
                             channel_id.as_deref().or(dm_channel_id.as_deref()),
                             author_id.as_deref(),
-                            limit_arg.unwrap_or(30),
+                            effective_limit,
                         )
                         .await
                     {
                         Ok(msgs) => {
-                            let title = format!("Search: {}", text_arg);
-                            let mut formatted = format_live_messages(&msgs, &title);
-                            if let Some(note) = refresh_note {
-                                formatted.push_str(&note);
+                            if msgs.is_empty() {
+                                fallback_note = Some(
+                                    "\n\n_Note: live search returned no results; showing cached results._"
+                                        .to_string(),
+                                );
+                            } else {
+                                let title = format!("Search: {}", text_arg);
+                                let mut formatted = format_live_messages(&msgs, &title);
+                                if let Some(note) = refresh_note {
+                                    formatted.push_str(&note);
+                                }
+                                if let Some(note) = fallback_note {
+                                    formatted.push_str(&note);
+                                }
+                                if let Some(note) = truncation_note {
+                                    formatted.push_str(&note);
+                                }
+                                return Ok(text_result(&formatted));
                             }
-                            return Ok(text_result(&formatted));
                         }
                         Err(e) => {
                             refresh_note = Some(format!(
@@ -886,7 +922,7 @@ pub async fn call_tool(
                 channel_id,
                 guild_id,
                 author_id,
-                limit: limit_arg,
+                limit: Some(effective_limit),
             };
 
             let rows = ctx
@@ -897,6 +933,12 @@ pub async fn call_tool(
             let title = format!("Search: {}", text_arg);
             let mut formatted = format_messages(&rows, &title);
             if let Some(note) = refresh_note {
+                formatted.push_str(&note);
+            }
+            if let Some(note) = fallback_note {
+                formatted.push_str(&note);
+            }
+            if let Some(note) = truncation_note {
                 formatted.push_str(&note);
             }
             Ok(text_result(&formatted))
@@ -1031,8 +1073,9 @@ pub async fn mcp_post(
         }
     };
 
-    // Under JSON-RPC 2.0, a notification is any request WITHOUT an 'id' member (or id is null)
-    let is_notification = req.get("id").is_none() || req.get("id") == Some(&Value::Null);
+    // Under JSON-RPC 2.0, an explicit id:null is a REQUEST and gets a normal
+    // JSON-RPC response (with id:null); only a missing id member is a notification (202).
+    let is_notification = req.get("id").is_none();
     if is_notification {
         return StatusCode::ACCEPTED.into_response();
     }
@@ -1056,7 +1099,7 @@ pub async fn mcp_post(
                 },
                 "serverInfo": {
                     "name": "discord-context",
-                    "version": "1.0.0"
+                    "version": env!("CARGO_PKG_VERSION")
                 }
             });
             Json(json!({

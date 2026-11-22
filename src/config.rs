@@ -14,6 +14,7 @@ static SETTINGS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Settings {
+    #[serde(default)]
     pub autostart: bool,
     #[serde(default)]
     pub gateway: bool,
@@ -26,6 +27,16 @@ impl Default for Settings {
             gateway: false,
         }
     }
+}
+
+fn read_settings(data_dir: &Path) -> Settings {
+    let settings_file = data_dir.join("settings.json");
+    if let Ok(content) = fs::read_to_string(&settings_file) {
+        if let Ok(settings) = serde_json::from_str::<Settings>(&content) {
+            return settings;
+        }
+    }
+    Settings::default()
 }
 
 #[derive(Clone, Debug, Default)]
@@ -55,36 +66,23 @@ pub fn load_config() -> Result<Config> {
         .and_then(|p| p.parse().ok())
         .unwrap_or(DEFAULT_PORT);
 
-    let autostart = load_autostart(&data_dir);
-    let gateway_enabled = load_gateway(&data_dir);
+    let settings = read_settings(&data_dir);
 
     Ok(Config {
         data_dir,
         log_dir,
         port,
-        autostart,
-        gateway_enabled,
+        autostart: settings.autostart,
+        gateway_enabled: settings.gateway,
     })
 }
 
 pub fn load_autostart(data_dir: &Path) -> bool {
-    let settings_file = data_dir.join("settings.json");
-    if let Ok(content) = fs::read_to_string(&settings_file) {
-        if let Ok(settings) = serde_json::from_str::<Settings>(&content) {
-            return settings.autostart;
-        }
-    }
-    false
+    read_settings(data_dir).autostart
 }
 
 pub fn load_gateway(data_dir: &Path) -> bool {
-    let settings_file = data_dir.join("settings.json");
-    if let Ok(content) = fs::read_to_string(&settings_file) {
-        if let Ok(settings) = serde_json::from_str::<Settings>(&content) {
-            return settings.gateway;
-        }
-    }
-    false
+    read_settings(data_dir).gateway
 }
 
 pub fn save_gateway(data_dir: &Path, enabled: bool) -> Result<()> {

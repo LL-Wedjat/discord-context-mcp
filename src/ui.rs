@@ -32,7 +32,10 @@ impl SettingsApp {
             .map(|g| g.clone())
             .unwrap_or_else(|_| "Ready".to_string());
 
-        let initial_gateway = state.config.gateway_enabled;
+        let initial_gateway = config::load_gateway(&state.config.data_dir);
+        state
+            .gateway_enabled
+            .store(initial_gateway, Ordering::SeqCst);
 
         Self {
             state,
@@ -167,7 +170,7 @@ impl eframe::App for SettingsApp {
                                     // Start the gateway in the background only when the user
                                     // explicitly enabled it. REST-only is the default and must
                                     // also apply to this primary token-setup flow.
-                                    let gateway_enabled = state_clone.config.gateway_enabled;
+                                    let gateway_enabled = state_clone.refresh_gateway_enabled();
                                     let gw_client = Arc::clone(&new_client);
                                     let gw_token = input_token.clone();
                                     tokio::spawn(async move {
@@ -246,8 +249,21 @@ impl eframe::App for SettingsApp {
                     match config::save_gateway(&data_dir, enabled) {
                         Ok(()) => {
                             info!("Gateway preference updated: {}", enabled);
-                            state_clone
-                                .set_status("Gateway preference saved — restart the app to apply");
+                            state_clone.refresh_gateway_enabled();
+                            if !enabled {
+                                {
+                                    let client_lock = state_clone.client.lock().await;
+                                    if let Some(c) = client_lock.as_ref() {
+                                        c.stop();
+                                    }
+                                }
+                                state_clone
+                                    .set_status("Gateway preference saved — live gateway disabled");
+                            } else {
+                                state_clone.set_status(
+                                    "Gateway preference saved — use Reconnect to start the gateway",
+                                );
+                            }
                         }
                         Err(e) => {
                             error!("Failed to save gateway setting: {}", e);
