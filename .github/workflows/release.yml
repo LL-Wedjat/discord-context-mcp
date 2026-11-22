@@ -20,6 +20,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
 
       - name: Set up Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -36,9 +38,11 @@ jobs:
         shell: powershell
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+          REF_NAME: ${{ github.ref_name }}
         run: |
-          $inputTag = "${{ github.event.inputs.tag }}"
-          $refName = "${{ github.ref_name }}"
+          $inputTag = $env:INPUT_TAG
+          $refName = $env:REF_NAME
           if ($inputTag -and $inputTag.Trim() -ne "") {
             $tag = $inputTag.Trim()
           } else {
@@ -54,5 +58,5 @@ jobs:
             gh release upload $tag $binary --clobber
           } else {
             Write-Host "Release $tag does not exist; creating release"
-            gh release create $tag $binary --title "$tag - first release (Rust)" --notes-file RELEASE_NOTES.md
+            gh release create $tag $binary --title "$tag" --notes-file RELEASE_NOTES.md
           }
