@@ -2,6 +2,8 @@
 name = "discord-context-mcp"
 version = "1.0.0"
 edition = "2021"
+repository = "https://github.com/LL-Wedjat/discord-context-mcp"
+homepage = "https://github.com/LL-Wedjat/discord-context-mcp#readme"
 
 [[bin]]
 name = "discord-context-mcp"
