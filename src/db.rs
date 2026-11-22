@@ -588,7 +588,13 @@ impl Db {
         }
 
         // Fallback to LIKE
-        let like_pat = format!("%{}%", query.replace('%', "\\%").replace('_', "\\_"));
+        let like_pat = format!(
+            "%{}%",
+            query
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_")
+        );
         let mut sql = String::from(
             "SELECT m.id, m.channel_id, m.author_id, m.content, m.timestamp, m.edited_timestamp,
                     m.attachments_json, m.embeds_json, m.reply_to, m.created_at_ms,
@@ -647,7 +653,14 @@ impl Db {
         let (sql, params): (String, Vec<rusqlite::types::Value>) = match query {
             Some(q) if !q.trim().is_empty() => (
                 "SELECT id, name, icon FROM guilds WHERE name LIKE ?1 ESCAPE '\\' ORDER BY name ASC".to_string(),
-                vec![format!("%{}%", q.trim().replace('%', "\\%").replace('_', "\\_")).into()],
+                vec![format!(
+                    "%{}%",
+                    q.trim()
+                        .replace('\\', "\\\\")
+                        .replace('%', "\\%")
+                        .replace('_', "\\_")
+                )
+                .into()],
             ),
             _ => ("SELECT id, name, icon FROM guilds ORDER BY name ASC".to_string(), vec![]),
         };
@@ -681,7 +694,14 @@ impl Db {
                     .to_string(),
                 vec![
                     guild_id.to_string().into(),
-                    format!("%{}%", q.trim().replace('%', "\\%").replace('_', "\\_")).into(),
+                    format!(
+                        "%{}%",
+                        q.trim()
+                            .replace('\\', "\\\\")
+                            .replace('%', "\\%")
+                            .replace('_', "\\_")
+                    )
+                    .into(),
                 ],
             ),
             _ => (
@@ -715,7 +735,13 @@ impl Db {
         let conn = self.conn.lock().unwrap();
         let (sql, params): (String, Vec<rusqlite::types::Value>) = match query {
             Some(q) if !q.trim().is_empty() => {
-                let pat = format!("%{}%", q.trim().replace('%', "\\%").replace('_', "\\_"));
+                let pat = format!(
+                    "%{}%",
+                    q.trim()
+                        .replace('\\', "\\\\")
+                        .replace('%', "\\%")
+                        .replace('_', "\\_")
+                );
                 (
                     "SELECT dm.id, u.id, u.username, u.global_name, u.discriminator, u.avatar
                      FROM dm_channels dm
@@ -784,7 +810,12 @@ impl Db {
         }
 
         // Fuzzy match via LIKE
-        let pat = format!("%{}%", q.replace('%', "\\%").replace('_', "\\_"));
+        let pat = format!(
+            "%{}%",
+            q.replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_")
+        );
         let fuzzy: Option<DiscordUser> = conn
             .query_row(
                 "SELECT id, username, global_name, discriminator, avatar FROM users
@@ -827,7 +858,12 @@ impl Db {
             return Ok(exact);
         }
 
-        let pat = format!("%{}%", q.replace('%', "\\%").replace('_', "\\_"));
+        let pat = format!(
+            "%{}%",
+            q.replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_")
+        );
         let fuzzy: Option<DiscordGuild> = conn
             .query_row(
                 "SELECT id, name, icon FROM guilds WHERE name LIKE ?1 ESCAPE '\\' ORDER BY updated_at DESC LIMIT 1",
@@ -870,7 +906,12 @@ impl Db {
             return Ok(exact);
         }
 
-        let pat = format!("%{}%", q.replace('%', "\\%").replace('_', "\\_"));
+        let pat = format!(
+            "%{}%",
+            q.replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_")
+        );
         let fuzzy: Option<DiscordChannel> = conn
             .query_row(
                 "SELECT id, guild_id, name, type, topic, parent_id FROM channels

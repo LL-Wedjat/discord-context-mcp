@@ -685,36 +685,66 @@ pub async fn call_tool(
                 }
             }
 
-            let guild_id = if let Some(s) = server_arg {
-                let found = ctx
+            let mut guild_id = None;
+            if let Some(s) = server_arg {
+                let mut found = ctx
                     .db
                     .find_guild(s)
                     .map_err(|e| sanitize_err(client_ref, &e.to_string()))?;
+                if found.is_none() {
+                    if let Some(c) = client_ref {
+                        if let Err(e) = c.list_guilds().await {
+                            refresh_note = Some(format!(
+                                "\n\n_Note: live refresh failed: {}; showing cached data._",
+                                c.sanitize(&e.to_string())
+                            ));
+                        }
+                        found = ctx
+                            .db
+                            .find_guild(s)
+                            .map_err(|e| sanitize_err(client_ref, &e.to_string()))?;
+                    }
+                }
                 match found {
-                    Some(g) => Some(g.id),
+                    Some(g) => guild_id = Some(g.id),
                     None => {
                         return Err(format!(
-                            "Server not found: '{}'. Use list_servers to see available servers.",
-                            s
+                            "Server not found: '{}'. Use list_servers to see available servers.{}",
+                            s,
+                            refresh_note.as_deref().unwrap_or("")
                         ))
                     }
                 }
-            } else {
-                None
-            };
+            }
 
-            let channel_id = if let Some(ch) = channel_arg {
+            let mut channel_id = None;
+            if let Some(ch) = channel_arg {
                 if let Some(ref g_id) = guild_id {
-                    let found = ctx
+                    let mut found = ctx
                         .db
                         .find_channel(g_id, ch)
                         .map_err(|e| sanitize_err(client_ref, &e.to_string()))?;
+                    if found.is_none() {
+                        if let Some(c) = client_ref {
+                            if let Err(e) = c.list_channels(g_id).await {
+                                refresh_note = Some(format!(
+                                    "\n\n_Note: live refresh failed: {}; showing cached data._",
+                                    c.sanitize(&e.to_string())
+                                ));
+                            }
+                            found = ctx
+                                .db
+                                .find_channel(g_id, ch)
+                                .map_err(|e| sanitize_err(client_ref, &e.to_string()))?;
+                        }
+                    }
                     match found {
-                        Some(c) => Some(c.id),
+                        Some(c) => channel_id = Some(c.id),
                         None => {
                             return Err(format!(
-                                "Channel not found: '{}' in server. Use list_channels to see available channels.",
-                                ch
+                                "Channel not found: '{}' in server. Use list_channels to see available channels.{}",
+                                ch,
+                                refresh_note.as_deref().unwrap_or("")
                             ))
                         }
                     }
@@ -724,27 +754,39 @@ pub async fn call_tool(
                             .to_string(),
                     );
                 }
-            } else {
-                None
-            };
+            }
 
-            let author_id = if let Some(p) = person_arg {
-                let found = ctx
+            let mut author_id = None;
+            if let Some(p) = person_arg {
+                let mut found = ctx
                     .db
                     .find_user(p)
                     .map_err(|e| sanitize_err(client_ref, &e.to_string()))?;
+                if found.is_none() {
+                    if let Some(c) = client_ref {
+                        if let Err(e) = c.list_dm_channels().await {
+                            refresh_note = Some(format!(
+                                "\n\n_Note: live refresh failed: {}; showing cached data._",
+                                c.sanitize(&e.to_string())
+                            ));
+                        }
+                        found = ctx
+                            .db
+                            .find_user(p)
+                            .map_err(|e| sanitize_err(client_ref, &e.to_string()))?;
+                    }
+                }
                 match found {
-                    Some(u) => Some(u.id),
+                    Some(u) => author_id = Some(u.id),
                     None => {
                         return Err(format!(
-                            "User not found: '{}'. Use list_dm_people to see contacts.",
-                            p
+                            "User not found: '{}'. Use list_dm_people to see contacts.{}",
+                            p,
+                            refresh_note.as_deref().unwrap_or("")
                         ))
                     }
                 }
-            } else {
-                None
-            };
+            }
 
             let filters = SearchFilters {
                 channel_id,
@@ -876,10 +918,25 @@ pub async fn mcp_post(
         .into_response();
     }
 
-    let method = req.get("method").and_then(|v| v.as_str()).unwrap_or("");
+    // JSON-RPC 2.0 conformance: validate method is a non-empty string
+    let method = match req.get("method").and_then(|v| v.as_str()) {
+        Some(m) if !m.is_empty() => m,
+        _ => {
+            return Json(json!({
+                "jsonrpc": "2.0",
+                "id": id.unwrap_or(Value::Null),
+                "error": {
+                    "code": -32600,
+                    "message": "Invalid Request"
+                }
+            }))
+            .into_response();
+        }
+    };
 
-    // Any notification starting with "notifications/" returns 202 Accepted with no body
-    if method.starts_with("notifications/") {
+    // Under JSON-RPC 2.0, a notification is any request WITHOUT an 'id' member (or id is null)
+    let is_notification = req.get("id").is_none() || req.get("id") == Some(&Value::Null);
+    if is_notification {
         return StatusCode::ACCEPTED.into_response();
     }
 

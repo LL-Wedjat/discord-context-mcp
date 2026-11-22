@@ -178,22 +178,70 @@ async fn test_http_jsonrpc_flow() {
     )
     .await;
     assert_eq!(notif_resp.status(), axum::http::StatusCode::ACCEPTED);
+    let notif_bytes = axum::body::to_bytes(notif_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert!(
+        notif_bytes.is_empty(),
+        "notification response body should be empty"
+    );
 
-    // Test unknown notification (starts with notifications/) returns 202
-    let unknown_notif_req = json!({
+    // Test any request without 'id' member is a notification returning 202 with no body (e.g. tools/list without id)
+    let tools_notif_req = json!({
         "jsonrpc": "2.0",
+        "method": "tools/list"
+    });
+    let tools_notif_resp = mcp_post(
+        State(ctx.clone()),
+        axum::body::Bytes::from(serde_json::to_vec(&tools_notif_req).unwrap()),
+    )
+    .await;
+    assert_eq!(tools_notif_resp.status(), axum::http::StatusCode::ACCEPTED);
+    let tools_notif_bytes = axum::body::to_bytes(tools_notif_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert!(
+        tools_notif_bytes.is_empty(),
+        "notification body must be empty"
+    );
+
+    // Test a request with id: null is also treated as a notification returning 202 with no body
+    let null_id_notif_req = json!({
+        "jsonrpc": "2.0",
+        "id": null,
         "method": "notifications/custom_event",
         "params": {}
     });
-    let unknown_notif_resp = mcp_post(
+    let null_id_resp = mcp_post(
         State(ctx.clone()),
-        axum::body::Bytes::from(serde_json::to_vec(&unknown_notif_req).unwrap()),
+        axum::body::Bytes::from(serde_json::to_vec(&null_id_notif_req).unwrap()),
     )
     .await;
-    assert_eq!(
-        unknown_notif_resp.status(),
-        axum::http::StatusCode::ACCEPTED
-    );
+    assert_eq!(null_id_resp.status(), axum::http::StatusCode::ACCEPTED);
+    let null_id_bytes = axum::body::to_bytes(null_id_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert!(null_id_bytes.is_empty());
+
+    // Test notifications/foo WITH an id returns normal JSON-RPC response, not 202
+    let notif_with_id_req = json!({
+        "jsonrpc": "2.0",
+        "id": 99,
+        "method": "notifications/custom_event",
+        "params": {}
+    });
+    let notif_with_id_resp = mcp_post(
+        State(ctx.clone()),
+        axum::body::Bytes::from(serde_json::to_vec(&notif_with_id_req).unwrap()),
+    )
+    .await;
+    assert_eq!(notif_with_id_resp.status(), axum::http::StatusCode::OK);
+    let bytes = axum::body::to_bytes(notif_with_id_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let notif_id_res: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(notif_id_res["id"], 99);
+    assert_eq!(notif_id_res["error"]["code"], -32601);
 
     // Test tools/list
     let list_req = json!({
@@ -275,6 +323,42 @@ async fn test_http_jsonrpc_flow() {
     assert_eq!(inv_resp["id"], 5);
     assert_eq!(inv_resp["error"]["code"], -32600);
     assert_eq!(inv_resp["error"]["message"], "Invalid Request");
+
+    // Test missing or empty method field -> -32600 Invalid Request
+    let missing_method_req = json!({
+        "jsonrpc": "2.0",
+        "id": 6
+    });
+    let resp = mcp_post(
+        State(ctx.clone()),
+        axum::body::Bytes::from(serde_json::to_vec(&missing_method_req).unwrap()),
+    )
+    .await;
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let missing_m_resp: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(missing_m_resp["id"], 6);
+    assert_eq!(missing_m_resp["error"]["code"], -32600);
+    assert_eq!(missing_m_resp["error"]["message"], "Invalid Request");
+
+    let empty_method_req = json!({
+        "jsonrpc": "2.0",
+        "id": 7,
+        "method": ""
+    });
+    let resp = mcp_post(
+        State(ctx.clone()),
+        axum::body::Bytes::from(serde_json::to_vec(&empty_method_req).unwrap()),
+    )
+    .await;
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let empty_m_resp: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(empty_m_resp["id"], 7);
+    assert_eq!(empty_m_resp["error"]["code"], -32600);
+    assert_eq!(empty_m_resp["error"]["message"], "Invalid Request");
 
     // Test malformed JSON -> -32700 Parse error
     let malformed_bytes = axum::body::Bytes::from("{ this is not valid json }");

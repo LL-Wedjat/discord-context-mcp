@@ -307,6 +307,32 @@ fn test_search_messages_like_path() {
         .unwrap();
     assert_eq!(res.len(), 1);
     assert_eq!(res[0].id, "m_like_1");
+
+    // Test search with literal backslash in LIKE fallback
+    let user_bs = DiscordUser {
+        id: "u_bs".to_string(),
+        username: "bs_user".to_string(),
+        global_name: None,
+        discriminator: None,
+        avatar: None,
+    };
+    let msg_bs = DiscordMessage {
+        id: "m_bs_1".to_string(),
+        channel_id: "c_like".to_string(),
+        author: user_bs,
+        content: r"C:\Windows\System32\cmd.exe path".to_string(),
+        timestamp: "2026-11-22T10:05:00Z".to_string(),
+        edited_timestamp: None,
+        attachments: vec![],
+        referenced_message: None,
+    };
+    db.upsert_message(&msg_bs).unwrap();
+
+    let res_bs = db
+        .search_messages(r"Windows\System32", &SearchFilters::default())
+        .unwrap();
+    assert_eq!(res_bs.len(), 1);
+    assert_eq!(res_bs[0].id, "m_bs_1");
 }
 
 #[test]
@@ -369,6 +395,52 @@ fn test_find_and_list_helpers() {
         "c99"
     );
     assert_eq!(db.find_channel("g99", "snoopy").unwrap().unwrap().id, "c99");
+
+    // Test literal backslash in find_guild, find_channel, find_user
+    let u_slash = DiscordUser {
+        id: "u_slash".to_string(),
+        username: r"foo\bar".to_string(),
+        global_name: Some(r"Slash\User".to_string()),
+        discriminator: None,
+        avatar: None,
+    };
+    db.upsert_user(&u_slash).unwrap();
+
+    let g_slash = DiscordGuild {
+        id: "g_slash".to_string(),
+        name: r"Guild\Slash".to_string(),
+        icon: None,
+    };
+    db.upsert_guild(&g_slash).unwrap();
+
+    let ch_slash = DiscordChannel {
+        id: "ch_slash".to_string(),
+        guild_id: Some("g_slash".to_string()),
+        name: r"chan\slash".to_string(),
+        kind: 0,
+        topic: None,
+        parent_id: None,
+    };
+    db.upsert_channel(&ch_slash).unwrap();
+
+    assert_eq!(
+        db.find_guild(r"Guild\Slash").unwrap().unwrap().id,
+        "g_slash"
+    );
+    assert_eq!(db.find_guild(r"ild\Sla").unwrap().unwrap().id, "g_slash");
+    assert_eq!(db.find_user(r"foo\bar").unwrap().unwrap().id, "u_slash");
+    assert_eq!(db.find_user(r"oo\ba").unwrap().unwrap().id, "u_slash");
+    assert_eq!(
+        db.find_channel("g_slash", r"chan\slash")
+            .unwrap()
+            .unwrap()
+            .id,
+        "ch_slash"
+    );
+    assert_eq!(
+        db.find_channel("g_slash", r"an\sla").unwrap().unwrap().id,
+        "ch_slash"
+    );
 
     // list_dm_people
     let dms = db.list_dm_people(Some("Charlie")).unwrap();
