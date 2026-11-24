@@ -13,21 +13,14 @@ const REG_RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
 
 static SETTINGS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct Settings {
     #[serde(default)]
     pub autostart: bool,
     #[serde(default)]
     pub gateway: bool,
-}
-
-impl Default for Settings {
-    fn default() -> Self {
-        Self {
-            autostart: false,
-            gateway: false,
-        }
-    }
+    #[serde(default)]
+    pub allow_writes: bool,
 }
 
 fn read_settings(data_dir: &Path) -> Settings {
@@ -50,6 +43,7 @@ pub struct Config {
     pub port: u16,
     pub autostart: bool,
     pub gateway_enabled: bool,
+    pub allow_writes: bool,
 }
 
 pub fn load_config() -> Result<Config> {
@@ -78,6 +72,7 @@ pub fn load_config() -> Result<Config> {
         port,
         autostart: settings.autostart,
         gateway_enabled: settings.gateway,
+        allow_writes: settings.allow_writes,
     })
 }
 
@@ -87,6 +82,16 @@ pub fn load_autostart(data_dir: &Path) -> bool {
 
 pub fn load_gateway(data_dir: &Path) -> bool {
     read_settings(data_dir).gateway
+}
+
+pub fn load_allow_writes(data_dir: &Path) -> bool {
+    read_settings(data_dir).allow_writes
+}
+
+pub fn save_allow_writes(data_dir: &Path, enabled: bool) -> Result<()> {
+    update_settings(data_dir, |settings| {
+        settings.allow_writes = enabled;
+    })
 }
 
 fn update_settings(data_dir: &Path, update: impl FnOnce(&mut Settings)) -> Result<()> {

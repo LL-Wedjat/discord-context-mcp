@@ -66,6 +66,7 @@ fn test_db_crud_and_stats() {
             proxy_url: None,
         }],
         referenced_message: None,
+        message_reference: None,
     };
     db.upsert_message(&msg1).unwrap();
 
@@ -179,6 +180,7 @@ fn test_get_messages_ordering_and_pagination() {
             edited_timestamp: None,
             attachments: vec![],
             referenced_message: None,
+        message_reference: None,
         };
         db.upsert_message(&msg).unwrap();
     }
@@ -228,6 +230,7 @@ fn test_search_messages_and_filters() {
         edited_timestamp: None,
         attachments: vec![],
         referenced_message: None,
+        message_reference: None,
     };
 
     let msg2 = DiscordMessage {
@@ -239,6 +242,7 @@ fn test_search_messages_and_filters() {
         edited_timestamp: None,
         attachments: vec![],
         referenced_message: None,
+        message_reference: None,
     };
 
     db.upsert_message(&msg1).unwrap();
@@ -299,6 +303,7 @@ fn test_search_messages_like_path() {
         edited_timestamp: None,
         attachments: vec![],
         referenced_message: None,
+        message_reference: None,
     };
     db.upsert_message(&msg).unwrap();
 
@@ -325,6 +330,7 @@ fn test_search_messages_like_path() {
         edited_timestamp: None,
         attachments: vec![],
         referenced_message: None,
+        message_reference: None,
     };
     db.upsert_message(&msg_bs).unwrap();
 
@@ -492,6 +498,7 @@ fn test_fts5_order_word_not_mangled() {
         edited_timestamp: None,
         attachments: vec![],
         referenced_message: None,
+        message_reference: None,
     };
     db.upsert_message(&msg).unwrap();
 
@@ -526,6 +533,7 @@ fn test_partial_message_update_and_created_at_preservation() {
         edited_timestamp: None,
         attachments: vec![],
         referenced_message: None,
+        message_reference: None,
     };
     db.upsert_message(&orig_msg).unwrap();
 
@@ -543,6 +551,7 @@ fn test_partial_message_update_and_created_at_preservation() {
         edited_timestamp: Some("2026-11-22T12:05:00Z".to_string()),
         attachments: None,
         referenced_message: None,
+        message_reference: None,
     };
     db.update_partial_message(&partial).unwrap();
 
@@ -566,10 +575,302 @@ fn test_partial_message_update_and_created_at_preservation() {
         edited_timestamp: Some("2026-11-22T13:00:00Z".to_string()),
         attachments: vec![],
         referenced_message: None,
+        message_reference: None,
     };
     db.upsert_message(&duplicate_upsert).unwrap();
 
     let after_dup = db.get_messages("c_update", None, None, None).unwrap();
     assert_eq!(after_dup.len(), 1);
     assert_eq!(after_dup[0].created_at_ms, orig_created_at);
+}
+
+#[test]
+fn test_dm_channels_migration_and_kind_persistence() {
+    let tmp = tempdir().unwrap();
+    let db_path = tmp.path().join("cache.db");
+
+    // Create legacy database without 'kind' column in dm_channels
+    {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE users (
+                 id TEXT PRIMARY KEY,
+                 username TEXT,
+                 global_name TEXT,
+                 discriminator TEXT,
+                 avatar TEXT,
+                 updated_at INTEGER
+             );
+             CREATE TABLE dm_channels (
+                 id TEXT PRIMARY KEY,
+                 user_id TEXT,
+                 name TEXT,
+                 updated_at INTEGER
+             );
+             INSERT INTO users VALUES ('u_legacy', 'legacy_user', 'Legacy', '0001', NULL, 1000);
+             INSERT INTO dm_channels VALUES ('dm_legacy', 'u_legacy', 'Legacy', 1000);",
+        )
+        .unwrap();
+    }
+
+    // open_db should migrate and add `kind` with DEFAULT 0
+    let db = open_db(tmp.path()).unwrap();
+
+    // Verify existing dm has kind == 0, so find_dm_channels_exact (WHERE kind = 1) does NOT match it
+    let found = db.find_dm_channels_exact("legacy_user").unwrap();
+    assert_eq!(found.len(), 0);
+
+    // Verify list_dm_people returns it with kind == 0
+    let people = db.list_dm_people(None).unwrap();
+    assert_eq!(people.len(), 1);
+    assert_eq!(people[0].kind, 0);
+
+    // Upserting with kind = 1 updates kind on conflict
+    let dm_updated = DmChannel {
+        id: "dm_legacy".to_string(),
+        recipient: DiscordUser {
+            id: "u_legacy".to_string(),
+            username: "legacy_user".to_string(),
+            global_name: Some("Legacy".to_string()),
+            discriminator: Some("0001".to_string()),
+            avatar: None,
+        },
+        kind: 1,
+    };
+    db.upsert_dm_channel(&dm_updated).unwrap();
+
+    // Now find_dm_channels_exact matches it
+    let found_now = db.find_dm_channels_exact("legacy_user").unwrap();
+    assert_eq!(found_now.len(), 1);
+    assert_eq!(found_now[0].kind, 1);
+}
+
+#[test]
+fn test_get_message_by_id_and_find_exact_helpers() {
+    let tmp = tempdir().unwrap();
+    let db = open_db(tmp.path()).unwrap();
+
+    let user = DiscordUser {
+        id: "u_exact".to_string(),
+        username: "exact_user".to_string(),
+        global_name: Some("Exact Display".to_string()),
+        discriminator: None,
+        avatar: None,
+    };
+    db.upsert_user(&user).unwrap();
+
+    let guild1 = DiscordGuild {
+        id: "g_exact1".to_string(),
+        name: "Test Guild".to_string(),
+        icon: None,
+    };
+    let guild2 = DiscordGuild {
+        id: "g_exact2".to_string(),
+        name: "Test Guild".to_string(), // duplicate name for >1 test
+        icon: None,
+    };
+    db.upsert_guild(&guild1).unwrap();
+    db.upsert_guild(&guild2).unwrap();
+
+    let ch1 = DiscordChannel {
+        id: "c_exact1".to_string(),
+        guild_id: Some("g_exact1".to_string()),
+        name: "general".to_string(),
+        kind: 0,
+        topic: None,
+        parent_id: None,
+    };
+    let ch2 = DiscordChannel {
+        id: "c_exact2".to_string(),
+        guild_id: Some("g_exact1".to_string()),
+        name: "general".to_string(), // duplicate name in same guild
+        kind: 0,
+        topic: None,
+        parent_id: None,
+    };
+    db.upsert_channel(&ch1).unwrap();
+    db.upsert_channel(&ch2).unwrap();
+
+    let dm1 = DmChannel {
+        id: "dm_exact1".to_string(),
+        recipient: user.clone(),
+        kind: 1,
+    };
+    let dm_group = DmChannel {
+        id: "dm_group".to_string(),
+        recipient: user.clone(),
+        kind: 3, // Group DM
+    };
+    db.upsert_dm_channel(&dm1).unwrap();
+    db.upsert_dm_channel(&dm_group).unwrap();
+
+    let msg = DiscordMessage {
+        id: "m_exact_123".to_string(),
+        channel_id: "c_exact1".to_string(),
+        author: user.clone(),
+        content: "Exact message content".to_string(),
+        timestamp: "2026-11-22T10:00:00Z".to_string(),
+        edited_timestamp: None,
+        attachments: vec![],
+        referenced_message: None,
+        message_reference: None,
+    };
+    db.upsert_message(&msg).unwrap();
+
+    // get_message_by_id
+    assert!(db.get_message_by_id("non_existent").unwrap().is_none());
+    let fetched = db.get_message_by_id("m_exact_123").unwrap().unwrap();
+    assert_eq!(fetched.id, "m_exact_123");
+    assert_eq!(fetched.content, "Exact message content");
+    assert_eq!(fetched.author_id, "u_exact");
+
+    // find_guilds_exact
+    assert_eq!(db.find_guilds_exact("").unwrap().len(), 0);
+    assert_eq!(db.find_guilds_exact("   ").unwrap().len(), 0);
+    assert_eq!(db.find_guilds_exact("g_exact1").unwrap().len(), 1);
+    assert_eq!(db.find_guilds_exact("test guild").unwrap().len(), 2); // case-insensitive, 2 matches
+    assert_eq!(db.find_guilds_exact("no_match").unwrap().len(), 0);
+
+    // find_channels_exact
+    assert_eq!(db.find_channels_exact("g_exact1", "").unwrap().len(), 0);
+    assert_eq!(
+        db.find_channels_exact("g_exact1", "#general")
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        db.find_channels_exact("g_exact1", "c_exact1")
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        db.find_channels_exact("g_exact1", "non_existent")
+            .unwrap()
+            .len(),
+        0
+    );
+
+    // find_dm_channels_exact
+    assert_eq!(db.find_dm_channels_exact("").unwrap().len(), 0);
+    assert_eq!(db.find_dm_channels_exact("exact_user").unwrap().len(), 1);
+    assert_eq!(
+        db.find_dm_channels_exact("exact display").unwrap().len(),
+        1
+    );
+    assert_eq!(db.find_dm_channels_exact("dm_exact1").unwrap().len(), 1);
+    // Group DM (kind == 3) must NOT be returned
+    assert_eq!(db.find_dm_channels_exact("dm_group").unwrap().len(), 0);
+}
+
+#[test]
+fn test_reply_to_fallback_and_tie_break_pagination() {
+    use discord_context_mcp::models::{MessageReference, PartialDiscordMessage};
+
+    let tmp = tempdir().unwrap();
+    let db = open_db(tmp.path()).unwrap();
+
+    let author = DiscordUser {
+        id: "u_reply".to_string(),
+        username: "reply_user".to_string(),
+        global_name: None,
+        discriminator: None,
+        avatar: None,
+    };
+
+    // Upsert with message_reference fallback
+    let msg_with_ref = DiscordMessage {
+        id: "m_reply_1".to_string(),
+        channel_id: "c_reply".to_string(),
+        author: author.clone(),
+        content: "Message replying via reference".to_string(),
+        timestamp: "2026-11-22T10:00:00Z".to_string(),
+        edited_timestamp: None,
+        attachments: vec![],
+        referenced_message: None,
+        message_reference: Some(MessageReference {
+            message_id: Some("orig_msg_999".to_string()),
+            channel_id: Some("c_reply".to_string()),
+            guild_id: None,
+        }),
+    };
+    db.upsert_message(&msg_with_ref).unwrap();
+
+    let fetched = db.get_message_by_id("m_reply_1").unwrap().unwrap();
+    assert_eq!(fetched.reply_to, Some("orig_msg_999".to_string()));
+
+    // Partial update with message_reference fallback
+    let partial = PartialDiscordMessage {
+        id: "m_reply_1".to_string(),
+        channel_id: None,
+        author: None,
+        content: Some("Updated reply content".to_string()),
+        timestamp: None,
+        edited_timestamp: None,
+        attachments: None,
+        referenced_message: None,
+        message_reference: Some(MessageReference {
+            message_id: Some("new_ref_888".to_string()),
+            channel_id: None,
+            guild_id: None,
+        }),
+    };
+    db.update_partial_message(&partial).unwrap();
+    let fetched_updated = db.get_message_by_id("m_reply_1").unwrap().unwrap();
+    assert_eq!(fetched_updated.reply_to, Some("new_ref_888".to_string()));
+
+    // Test same-millisecond tie-break pagination
+    // 3 messages with the EXACT same timestamp but distinct snowflake IDs
+    let fixed_ts = "2026-11-22T10:00:00Z";
+    let m1 = DiscordMessage {
+        id: "100000000000000001".to_string(),
+        channel_id: "c_tie".to_string(),
+        author: author.clone(),
+        content: "First".to_string(),
+        timestamp: fixed_ts.to_string(),
+        edited_timestamp: None,
+        attachments: vec![],
+        referenced_message: None,
+        message_reference: None,
+    };
+    let m2 = DiscordMessage {
+        id: "100000000000000002".to_string(),
+        channel_id: "c_tie".to_string(),
+        author: author.clone(),
+        content: "Second".to_string(),
+        timestamp: fixed_ts.to_string(),
+        edited_timestamp: None,
+        attachments: vec![],
+        referenced_message: None,
+        message_reference: None,
+    };
+    let m3 = DiscordMessage {
+        id: "100000000000000003".to_string(),
+        channel_id: "c_tie".to_string(),
+        author: author.clone(),
+        content: "Third".to_string(),
+        timestamp: fixed_ts.to_string(),
+        edited_timestamp: None,
+        attachments: vec![],
+        referenced_message: None,
+        message_reference: None,
+    };
+    db.upsert_message(&m1).unwrap();
+    db.upsert_message(&m2).unwrap();
+    db.upsert_message(&m3).unwrap();
+
+    // Query 'before' m3 -> should tie-break on ID and return m1, m2
+    let tie_before = db
+        .get_messages("c_tie", Some(10), Some("100000000000000003"), None)
+        .unwrap();
+    assert_eq!(tie_before.len(), 2);
+    assert_eq!(tie_before[0].id, "100000000000000001");
+    assert_eq!(tie_before[1].id, "100000000000000002");
+
+    // Uncached valid snowflake before (e.g. 999999999999999999 >= 4_194_304)
+    let uncached_before = db
+        .get_messages("c_tie", Some(10), Some("999999999999999999"), None)
+        .unwrap();
+    assert_eq!(uncached_before.len(), 3);
 }

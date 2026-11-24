@@ -1,5 +1,5 @@
-use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -25,6 +25,16 @@ pub const USER_AGENT: &str = concat!(
     env!("CARGO_PKG_VERSION"),
     " (+https://github.com/LL-Wedjat/discord-context-mcp)"
 );
+
+#[derive(thiserror::Error, Debug)]
+pub enum WriteApiError {
+    #[error("Write burst limit exceeded (max 5 actions per 60s). Retry after {retry_after_secs}s")]
+    BurstLimitExceeded { retry_after_secs: u64 },
+    #[error("Discord write rate limited. Retry after {retry_after_ms}ms")]
+    RateLimited { retry_after_ms: u64 },
+    #[error("Discord CAPTCHA or challenge detected: {0}")]
+    CaptchaOrChallenge(String),
+}
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Bucket {
@@ -63,7 +73,7 @@ pub struct SyncReport {
 
 pub fn base64_encode(input: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity((input.len() + 2) / 3 * 4);
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
     let mut i = 0;
     while i < input.len() {
         let b0 = input[i] as usize;
@@ -131,14 +141,44 @@ pub fn build_rest_headers() -> Result<HeaderMap> {
 pub fn normalize_route_key(method: &reqwest::Method, path: &str) -> String {
     let parts: Vec<&str> = path.trim_start_matches('/').split('/').collect();
     let mut norm_parts = Vec::with_capacity(parts.len());
-    for part in parts {
-        if !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()) {
+    for (i, part) in parts.iter().enumerate() {
+        if i > 0 && parts[i - 1] == "reactions" && *part != "@me" {
+            norm_parts.push(":emoji");
+        } else if !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()) {
             norm_parts.push(":id");
         } else {
-            norm_parts.push(part);
+            norm_parts.push(*part);
         }
     }
     format!("{}:/{}", method.as_str(), norm_parts.join("/"))
+}
+
+pub fn encode_path_segment(s: &str) -> Result<String> {
+    if s.is_empty() || s.trim().is_empty() {
+        return Err(anyhow!("Path segment cannot be empty"));
+    }
+    if s == "." {
+        return Err(anyhow!("Path segment cannot be '.'"));
+    }
+    if s.contains('/') || s.contains('?') || s.contains('#') || s.contains("..") {
+        return Err(anyhow!("Path segment contains invalid characters (/ ? # ..)"));
+    }
+    if s.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err(anyhow!("Path segment contains whitespace or control characters"));
+    }
+    let mut out = String::with_capacity(s.len() * 3);
+    for b in s.as_bytes() {
+        match *b {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b':' => {
+                out.push(*b as char);
+            }
+            byte => {
+                use std::fmt::Write;
+                let _ = write!(out, "%{:02X}", byte);
+            }
+        }
+    }
+    Ok(out)
 }
 
 pub fn parse_search_response(value: &serde_json::Value) -> Result<Vec<DiscordMessage>> {
@@ -179,6 +219,8 @@ pub struct DiscordClient {
     pub shutdown_notify: Arc<tokio::sync::Notify>,
     pub last_identify: Arc<Mutex<Instant>>,
     pub rest_semaphore: Arc<tokio::sync::Semaphore>,
+    pub write_timestamps: Arc<std::sync::Mutex<VecDeque<Instant>>>,
+    pub write_nonce_seq: Arc<AtomicU64>,
 }
 
 impl DiscordClient {
@@ -203,6 +245,8 @@ impl DiscordClient {
             shutdown_notify: Arc::new(tokio::sync::Notify::new()),
             last_identify: Arc::new(Mutex::new(Instant::now() - Duration::from_secs(10))),
             rest_semaphore: Arc::new(tokio::sync::Semaphore::new(2)),
+            write_timestamps: Arc::new(std::sync::Mutex::new(VecDeque::new())),
+            write_nonce_seq: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -235,6 +279,17 @@ impl DiscordClient {
         *me_lock = Some(user.clone());
 
         Ok(user)
+    }
+
+    pub async fn ensure_me(&self) -> Result<String> {
+        {
+            let me_guard = self.me.lock().await;
+            if let Some(user) = me_guard.as_ref() {
+                return Ok(user.id.clone());
+            }
+        }
+        let user = self.init().await?;
+        Ok(user.id)
     }
 
     pub async fn rest(
@@ -411,6 +466,339 @@ impl DiscordClient {
 
             return Ok(Some(val));
         }
+    }
+
+    pub async fn rest_write(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<&serde_json::Value>,
+    ) -> Result<Option<serde_json::Value>> {
+        let route_key = normalize_route_key(&method, path);
+
+        // 1. Fail-fast rate limit check (do NOT sleep, do NOT consume burst-cap slot)
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let global_reset = self.global_reset_ms.load(Ordering::SeqCst);
+        if global_reset > now_ms {
+            let retry_after_ms = (global_reset - now_ms) as u64;
+            return Err(WriteApiError::RateLimited { retry_after_ms }.into());
+        }
+
+        {
+            let rl = self.rate_limits.lock().await;
+            let wait_ms = if let Some(bucket) = rl.get(&route_key) {
+                compute_bucket_wait_ms(bucket, now_ms)
+            } else {
+                0
+            };
+            drop(rl);
+
+            if wait_ms > 0 {
+                return Err(WriteApiError::RateLimited {
+                    retry_after_ms: wait_ms,
+                }
+                .into());
+            }
+        }
+
+        // 2. Burst cap: max 5 actions per 60s sliding window
+        {
+            let now = Instant::now();
+            let sixty_secs = Duration::from_secs(60);
+            let mut timestamps = self
+                .write_timestamps
+                .lock()
+                .map_err(|e| anyhow!("Failed to lock write_timestamps: {}", e))?;
+
+            while let Some(&front) = timestamps.front() {
+                if now.duration_since(front) >= sixty_secs {
+                    timestamps.pop_front();
+                } else {
+                    break;
+                }
+            }
+
+            if timestamps.len() >= 5 {
+                let oldest = *timestamps.front().unwrap();
+                let elapsed = now.duration_since(oldest);
+                let retry_after_secs = sixty_secs
+                    .saturating_sub(elapsed)
+                    .as_secs_f64()
+                    .ceil()
+                    .max(1.0) as u64;
+                return Err(WriteApiError::BurstLimitExceeded { retry_after_secs }.into());
+            }
+
+            timestamps.push_back(now);
+        } // lock dropped before any .await
+
+        // 3. Single HTTP request using rest_semaphore
+        let permit = self
+            .rest_semaphore
+            .acquire()
+            .await
+            .map_err(|e| anyhow!("REST semaphore closed: {}", e))?;
+
+        let url_str = format!("{}{}", self.base.trim_end_matches('/'), path);
+        let mut req_builder = self
+            .http
+            .request(method.clone(), &url_str)
+            .header(AUTHORIZATION, &self.token);
+
+        if let Some(b) = body {
+            req_builder = req_builder.json(b);
+        }
+
+        let response = req_builder.send().await;
+        drop(permit);
+
+        let resp = match response {
+            Ok(r) => r,
+            Err(e) => {
+                let sanitized = self.sanitize(&e.to_string());
+                return Err(anyhow!("HTTP write request failed: {}", sanitized));
+            }
+        };
+
+        let status = resp.status();
+        let headers = resp.headers().clone();
+
+        let rem_header = headers
+            .get("x-ratelimit-remaining")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<i64>().ok());
+        let reset_after_header = headers
+            .get("x-ratelimit-reset-after")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<f64>().ok())
+            .map(|v| (v * 1000.0) as i64);
+        let is_global = headers
+            .get("x-ratelimit-global")
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+
+        if let (Some(rem), Some(reset_ms)) = (rem_header, reset_after_header) {
+            let target_ms = chrono::Utc::now().timestamp_millis() + reset_ms;
+            if is_global {
+                self.global_reset_ms.store(target_ms, Ordering::SeqCst);
+            } else {
+                let mut rl = self.rate_limits.lock().await;
+                rl.insert(
+                    route_key.clone(),
+                    Bucket {
+                        remaining: rem,
+                        reset_at_ms: target_ms,
+                    },
+                );
+            }
+        }
+
+        // 4. Status 204 No Content
+        if status == reqwest::StatusCode::NO_CONTENT {
+            return Ok(None);
+        }
+
+        // 5. Any non-2xx status: check for CAPTCHA or Cloudflare challenge
+        if !status.is_success() {
+            let raw_body = resp.text().await.unwrap_or_default();
+            let sanitized_body = self.sanitize(&raw_body);
+            let lower_body = raw_body.to_ascii_lowercase();
+
+            if lower_body.contains("captcha_key")
+                || lower_body.contains("<html")
+                || lower_body.contains("<!doctype html")
+                || lower_body.contains("cf-browser-verification")
+            {
+                return Err(WriteApiError::CaptchaOrChallenge(sanitized_body).into());
+            }
+
+            // 6. Non-captcha 429: update rate limit bucket and return RateLimited
+            if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                let retry_after_s =
+                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw_body) {
+                        val.get("retry_after").and_then(|v| v.as_f64())
+                    } else {
+                        None
+                    };
+                let sleep_ms = rate_limit_delay_ms(retry_after_s, reset_after_header);
+                let target_reset_ms = chrono::Utc::now().timestamp_millis() + sleep_ms as i64;
+
+                if is_global {
+                    self.global_reset_ms
+                        .store(target_reset_ms, Ordering::SeqCst);
+                } else {
+                    let mut rl = self.rate_limits.lock().await;
+                    rl.insert(
+                        route_key.clone(),
+                        Bucket {
+                            remaining: 0,
+                            reset_at_ms: target_reset_ms,
+                        },
+                    );
+                }
+                return Err(WriteApiError::RateLimited {
+                    retry_after_ms: sleep_ms,
+                }
+                .into());
+            }
+
+            // 7. Other non-2xx error
+            return Err(anyhow!(
+                "Discord API error HTTP {}: {}",
+                status.as_u16(),
+                sanitized_body
+            ));
+        }
+
+        // Success response with body
+        let val: serde_json::Value = resp.json().await.map_err(|e| {
+            anyhow!(
+                "Failed to parse write response JSON: {}",
+                self.sanitize(&e.to_string())
+            )
+        })?;
+
+        Ok(Some(val))
+    }
+
+    pub async fn fetch_message_around(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+    ) -> Result<Option<DiscordMessage>> {
+        let path = format!("/channels/{}/messages", channel_id);
+        let query = vec![
+            ("around".to_string(), message_id.to_string()),
+            ("limit".to_string(), "5".to_string()),
+        ];
+
+        let resp = self
+            .rest(reqwest::Method::GET, &path, Some(&query), None)
+            .await?;
+
+        let val = resp.ok_or_else(|| anyhow!("Empty messages response"))?;
+        let messages: Vec<DiscordMessage> =
+            serde_json::from_value(val).context("Failed to deserialize messages array")?;
+
+        let mut target = None;
+        for msg in &messages {
+            let _ = self.db.upsert_message(msg);
+            if msg.id == message_id {
+                target = Some(msg.clone());
+            }
+        }
+
+        Ok(target)
+    }
+
+    pub async fn send_message(
+        &self,
+        channel_id: &str,
+        content: &str,
+        reply_to: Option<&str>,
+        mention_reply_author: bool,
+    ) -> Result<DiscordMessage> {
+        let seq = self.write_nonce_seq.fetch_add(1, Ordering::SeqCst);
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let nonce = format!("{}_{}", now_ms, seq);
+
+        let mut body = json!({
+            "content": content,
+            "nonce": nonce,
+            "enforce_nonce": true,
+        });
+
+        let mut allowed_mentions = json!({
+            "parse": ["users"]
+        });
+
+        if let Some(ref_id) = reply_to {
+            body["message_reference"] = json!({
+                "message_id": ref_id,
+                "fail_if_not_exists": false
+            });
+            allowed_mentions["replied_user"] = json!(mention_reply_author);
+        }
+
+        body["allowed_mentions"] = allowed_mentions;
+
+        let path = format!("/channels/{}/messages", channel_id);
+        let resp = self
+            .rest_write(reqwest::Method::POST, &path, Some(&body))
+            .await?;
+
+        let val = resp.ok_or_else(|| anyhow!("Empty response from send_message"))?;
+        let message: DiscordMessage = serde_json::from_value(val)
+            .context("Failed to deserialize sent message response")?;
+        let _ = self.db.upsert_message(&message);
+
+        Ok(message)
+    }
+
+    pub async fn edit_message(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+        content: &str,
+    ) -> Result<DiscordMessage> {
+        let body = json!({
+            "content": content,
+            "allowed_mentions": {
+                "parse": ["users"]
+            }
+        });
+
+        let path = format!("/channels/{}/messages/{}", channel_id, message_id);
+        let resp = self
+            .rest_write(reqwest::Method::PATCH, &path, Some(&body))
+            .await?;
+
+        let val = resp.ok_or_else(|| anyhow!("Empty response from edit_message"))?;
+        let message: DiscordMessage = serde_json::from_value(val)
+            .context("Failed to deserialize edited message response")?;
+        let _ = self.db.upsert_message(&message);
+
+        Ok(message)
+    }
+
+    pub async fn delete_message(&self, channel_id: &str, message_id: &str) -> Result<()> {
+        let path = format!("/channels/{}/messages/{}", channel_id, message_id);
+        self.rest_write(reqwest::Method::DELETE, &path, None)
+            .await?;
+        let _ = self.db.delete_message(message_id);
+        Ok(())
+    }
+
+    pub async fn add_reaction(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+        emoji: &str,
+    ) -> Result<()> {
+        let encoded = encode_path_segment(emoji)?;
+        let path = format!(
+            "/channels/{}/messages/{}/reactions/{}/@me",
+            channel_id, message_id, encoded
+        );
+        self.rest_write(reqwest::Method::PUT, &path, None).await?;
+        Ok(())
+    }
+
+    pub async fn remove_reaction(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+        emoji: &str,
+    ) -> Result<()> {
+        let encoded = encode_path_segment(emoji)?;
+        let path = format!(
+            "/channels/{}/messages/{}/reactions/{}/@me",
+            channel_id, message_id, encoded
+        );
+        self.rest_write(reqwest::Method::DELETE, &path, None)
+            .await?;
+        Ok(())
     }
 
     pub async fn list_guilds(&self) -> Result<Vec<DiscordGuild>> {
@@ -939,11 +1327,11 @@ impl DiscordClient {
                                             {
                                                 let mut last_id = self.last_identify.lock().await;
                                                 let elapsed = last_id.elapsed();
-                                                if elapsed < Duration::from_secs(5) {
-                                                    if self.sleep_or_shutdown(Duration::from_secs(5) - elapsed).await {
-                                                        should_reconnect = false;
-                                                        break;
-                                                    }
+                                                if elapsed < Duration::from_secs(5)
+                                                    && self.sleep_or_shutdown(Duration::from_secs(5) - elapsed).await
+                                                {
+                                                    should_reconnect = false;
+                                                    break;
                                                 }
                                                 *last_id = Instant::now();
                                             }
@@ -1057,10 +1445,11 @@ impl DiscordClient {
                 }
             }
 
-            if should_reconnect && !self.shutdown.load(Ordering::SeqCst) {
-                if self.sleep_or_shutdown(Duration::from_secs(1)).await {
-                    break;
-                }
+            if should_reconnect
+                && !self.shutdown.load(Ordering::SeqCst)
+                && self.sleep_or_shutdown(Duration::from_secs(1)).await
+            {
+                break;
             }
         }
 

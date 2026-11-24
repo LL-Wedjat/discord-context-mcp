@@ -52,6 +52,16 @@ pub struct Attachment {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct MessageReference {
+    #[serde(default)]
+    pub message_id: Option<String>,
+    #[serde(default)]
+    pub channel_id: Option<String>,
+    #[serde(default)]
+    pub guild_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct DiscordMessage {
     pub id: String,
     pub channel_id: String,
@@ -65,6 +75,8 @@ pub struct DiscordMessage {
     pub attachments: Vec<Attachment>,
     #[serde(default)]
     pub referenced_message: Option<Box<DiscordMessage>>,
+    #[serde(default)]
+    pub message_reference: Option<MessageReference>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -84,4 +96,6 @@ pub struct PartialDiscordMessage {
     pub attachments: Option<Vec<Attachment>>,
     #[serde(default)]
     pub referenced_message: Option<Box<DiscordMessage>>,
+    #[serde(default)]
+    pub message_reference: Option<MessageReference>,
 }

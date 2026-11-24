@@ -16,9 +16,12 @@ pub struct SettingsApp {
     pub status_text: String,
     pub autostart_toggle: bool,
     pub gateway_toggle: bool,
+    pub allow_writes_toggle: bool,
     pub is_saving: bool,
     gateway_tx: mpsc::UnboundedSender<bool>,
     gateway_in_flight: Arc<AtomicUsize>,
+    write_tx: mpsc::UnboundedSender<bool>,
+    write_in_flight: Arc<AtomicUsize>,
 }
 
 impl SettingsApp {
@@ -36,9 +39,48 @@ impl SettingsApp {
             .unwrap_or_else(|_| "Ready".to_string());
 
         let initial_gateway = state.gateway_enabled.load(Ordering::SeqCst);
+        let initial_writes = state.allow_writes.load(Ordering::SeqCst);
 
         let (gateway_tx, mut gateway_rx) = mpsc::unbounded_channel::<bool>();
         let gateway_in_flight = Arc::new(AtomicUsize::new(0));
+
+        let (write_tx, mut write_rx) = mpsc::unbounded_channel::<bool>();
+        let write_in_flight = Arc::new(AtomicUsize::new(0));
+
+        let state_for_writes = state.clone();
+        let in_flight_for_writes = Arc::clone(&write_in_flight);
+        state.tokio_handle.spawn(async move {
+            while let Some(enabled) = write_rx.recv().await {
+                let data_dir = state_for_writes.config.data_dir.clone();
+                match config::save_allow_writes(&data_dir, enabled) {
+                    Ok(()) => {
+                        info!("Allow writes preference updated: {}", enabled);
+                        if enabled {
+                            state_for_writes.allow_writes.store(true, Ordering::SeqCst);
+                            state_for_writes.write_circuit_open.store(false, Ordering::SeqCst);
+                            state_for_writes.set_status("Write actions enabled (sending & modifying messages)");
+                        } else {
+                            state_for_writes.allow_writes.store(false, Ordering::SeqCst);
+                            state_for_writes.set_status("Write actions disabled — MCP server is read-only");
+                        }
+                    }
+                    Err(e) => {
+                        error!("Failed to save allow_writes setting: {}", e);
+                        if enabled {
+                            state_for_writes.refresh_allow_writes();
+                        } else {
+                            state_for_writes.allow_writes.store(false, Ordering::SeqCst);
+                        }
+                        state_for_writes.set_status(format!("Allow writes save error: {}", e));
+                    }
+                }
+                in_flight_for_writes.fetch_sub(1, Ordering::SeqCst);
+                let guard = state_for_writes.repaint_signal.lock().await;
+                if let Some(ctx) = guard.as_ref() {
+                    ctx.request_repaint();
+                }
+            }
+        });
 
         let state_for_gw = state.clone();
         let in_flight_for_gw = Arc::clone(&gateway_in_flight);
@@ -89,9 +131,12 @@ impl SettingsApp {
             status_text: initial_status,
             autostart_toggle: initial_autostart,
             gateway_toggle: initial_gateway,
+            allow_writes_toggle: initial_writes,
             is_saving: false,
             gateway_tx,
             gateway_in_flight,
+            write_tx,
+            write_in_flight,
         }
     }
 }
@@ -127,6 +172,11 @@ impl eframe::App for SettingsApp {
         // Sync gateway_toggle from state when no save task is in flight
         if self.gateway_in_flight.load(Ordering::SeqCst) == 0 {
             self.gateway_toggle = self.state.gateway_enabled.load(Ordering::SeqCst);
+        }
+
+        // Sync allow_writes_toggle from state when no save task is in flight
+        if self.write_in_flight.load(Ordering::SeqCst) == 0 {
+            self.allow_writes_toggle = self.state.allow_writes.load(Ordering::SeqCst);
         }
 
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -220,6 +270,11 @@ impl eframe::App for SettingsApp {
                                         *tp_lock = true;
                                     }
 
+                                    // Reset write circuit open flag on successful token save
+                                    state_clone
+                                        .write_circuit_open
+                                        .store(false, Ordering::SeqCst);
+
                                     // Start the gateway in the background only when the user
                                     // explicitly enabled it. REST-only is the default and must
                                     // also apply to this primary token-setup flow.
@@ -302,6 +357,36 @@ impl eframe::App for SettingsApp {
                 }
             }
 
+            // Allow Writes Checkbox
+            if ui
+                .checkbox(
+                    &mut self.allow_writes_toggle,
+                    "Allow sending & modifying messages (ToS / ban risk)",
+                )
+                .changed()
+            {
+                let enabled = self.allow_writes_toggle;
+                if !enabled {
+                    self.state.allow_writes.store(false, Ordering::SeqCst);
+                }
+                self.write_in_flight.fetch_add(1, Ordering::SeqCst);
+                if self.write_tx.send(enabled).is_err() {
+                    self.write_in_flight.fetch_sub(1, Ordering::SeqCst);
+                }
+            }
+
+            if self.state.write_circuit_open.load(Ordering::SeqCst) {
+                ui.colored_label(
+                    Color32::from_rgb(255, 170, 0),
+                    "Write circuit paused (Discord CAPTCHA/challenge) — Reconnect or re-toggle to resume",
+                );
+            } else if self.state.allow_writes.load(Ordering::SeqCst) {
+                ui.colored_label(
+                    Color32::from_rgb(255, 170, 0),
+                    "Writes enabled: sending or modifying messages carries account ban risk",
+                );
+            }
+
             ui.add_space(12.0);
 
             // Bottom action buttons: Hide and Quit
@@ -337,8 +422,8 @@ pub fn run_ui(state: AppState) -> eframe::Result<()> {
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Discord Context MCP")
-            .with_inner_size([420.0, 260.0])
-            .with_min_inner_size([360.0, 220.0])
+            .with_inner_size([420.0, 310.0])
+            .with_min_inner_size([360.0, 275.0])
             .with_visible(!token_present)
             .with_resizable(true),
         ..Default::default()

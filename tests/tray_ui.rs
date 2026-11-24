@@ -13,6 +13,7 @@ fn test_state() -> (tempfile::TempDir, tokio::runtime::Runtime, AppState) {
         port: 0,
         autostart: false,
         gateway_enabled: false,
+        allow_writes: false,
     };
     let db = Arc::new(open_db(tmp.path()).expect("db"));
     let state = AppState::new(config, db, false, rt.handle().clone());

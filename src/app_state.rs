@@ -20,6 +20,8 @@ pub struct AppState {
     pub token_present: Arc<Mutex<bool>>,
     pub autostart: Arc<Mutex<bool>>,
     pub gateway_enabled: Arc<AtomicBool>,
+    pub allow_writes: Arc<AtomicBool>,
+    pub write_circuit_open: Arc<AtomicBool>,
     pub validating: Arc<AtomicBool>,
     pub shutdown: Arc<AtomicBool>,
     pub ctx: Arc<Mutex<Option<AppContext>>>,
@@ -51,6 +53,8 @@ impl AppState {
             token_present: Arc::new(Mutex::new(token_present)),
             autostart: Arc::new(Mutex::new(config.autostart)),
             gateway_enabled: Arc::new(AtomicBool::new(config.gateway_enabled)),
+            allow_writes: Arc::new(AtomicBool::new(config.allow_writes)),
+            write_circuit_open: Arc::new(AtomicBool::new(false)),
             validating: Arc::new(AtomicBool::new(false)),
             shutdown: Arc::new(AtomicBool::new(false)),
             ctx: Arc::new(Mutex::new(None)),
@@ -67,6 +71,12 @@ impl AppState {
     pub fn refresh_gateway_enabled(&self) -> bool {
         let persisted = crate::config::load_gateway(&self.config.data_dir);
         self.gateway_enabled.store(persisted, Ordering::SeqCst);
+        persisted
+    }
+
+    pub fn refresh_allow_writes(&self) -> bool {
+        let persisted = crate::config::load_allow_writes(&self.config.data_dir);
+        self.allow_writes.store(persisted, Ordering::SeqCst);
         persisted
     }
 

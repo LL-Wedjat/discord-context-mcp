@@ -126,6 +126,7 @@ impl Db {
                  id TEXT PRIMARY KEY,
                  user_id TEXT,
                  name TEXT,
+                 kind INTEGER NOT NULL DEFAULT 1,
                  updated_at INTEGER
              );
 
@@ -151,6 +152,23 @@ impl Db {
                  value TEXT
              );",
         )?;
+
+        // Legacy migration: check if dm_channels has 'kind' column
+        let mut has_kind = false;
+        let mut stmt = conn.prepare("PRAGMA table_info(dm_channels)")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(1))?;
+        for col in rows {
+            if col? == "kind" {
+                has_kind = true;
+                break;
+            }
+        }
+        if !has_kind {
+            conn.execute(
+                "ALTER TABLE dm_channels ADD COLUMN kind INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+        }
 
         // Setup FTS5 or fallback to LIKE
         let fts_setup = conn.execute_batch(
@@ -258,13 +276,14 @@ impl Db {
             .unwrap_or_else(|| dm.recipient.username.clone());
 
         conn.execute(
-            "INSERT INTO dm_channels (id, user_id, name, updated_at)
-             VALUES (?1, ?2, ?3, ?4)
+            "INSERT INTO dm_channels (id, user_id, name, kind, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
              ON CONFLICT(id) DO UPDATE SET
                  user_id = excluded.user_id,
                  name = excluded.name,
+                 kind = excluded.kind,
                  updated_at = excluded.updated_at",
-            params![dm.id, dm.recipient.id, display_name, now],
+            params![dm.id, dm.recipient.id, display_name, dm.kind, now],
         )?;
         Ok(())
     }
@@ -323,9 +342,19 @@ impl Db {
                 query_params.push(serde_json::to_string(atts)?.into());
             }
         }
-        if let Some(ref rm) = partial.referenced_message {
+        let reply_to = partial
+            .referenced_message
+            .as_ref()
+            .map(|rm| rm.id.clone())
+            .or_else(|| {
+                partial
+                    .message_reference
+                    .as_ref()
+                    .and_then(|mr| mr.message_id.clone())
+            });
+        if let Some(ref rid) = reply_to {
             sets.push("reply_to = ?".to_string());
-            query_params.push(rm.id.clone().into());
+            query_params.push(rid.clone().into());
         }
 
         query_params.push(partial.id.clone().into());
@@ -346,7 +375,16 @@ impl Db {
             Some(serde_json::to_string(&message.attachments)?)
         };
 
-        let reply_to = message.referenced_message.as_ref().map(|rm| rm.id.clone());
+        let reply_to = message
+            .referenced_message
+            .as_ref()
+            .map(|rm| rm.id.clone())
+            .or_else(|| {
+                message
+                    .message_reference
+                    .as_ref()
+                    .and_then(|mr| mr.message_id.clone())
+            });
 
         conn.execute(
             "INSERT INTO messages (
@@ -415,58 +453,83 @@ impl Db {
         let conn = self.conn.lock().unwrap();
         let limit = limit.unwrap_or(50).clamp(1, 100);
 
-        let before_ms: Option<i64> = if let Some(b_id) = before {
-            let found: Option<i64> = conn
-                .query_row(
-                    "SELECT created_at_ms FROM messages WHERE id = ?1",
-                    params![b_id],
-                    |r| r.get(0),
-                )
-                .optional()?;
-            match found {
-                Some(ms) => Some(ms),
-                None => {
-                    return Err(anyhow::anyhow!(
-                        "Anchor message '{}' (before) not found in cache",
-                        b_id
-                    ))
-                }
-            }
-        } else {
-            None
-        };
-
-        let after_ms: Option<i64> = if let Some(a_id) = after {
-            let found: Option<i64> = conn
-                .query_row(
-                    "SELECT created_at_ms FROM messages WHERE id = ?1",
-                    params![a_id],
-                    |r| r.get(0),
-                )
-                .optional()?;
-            match found {
-                Some(ms) => Some(ms),
-                None => {
-                    return Err(anyhow::anyhow!(
-                        "Anchor message '{}' (after) not found in cache",
-                        a_id
-                    ))
-                }
-            }
-        } else {
-            None
-        };
-
         let mut conditions = vec!["m.channel_id = ?1".to_string()];
         let mut query_params: Vec<rusqlite::types::Value> = vec![channel_id.to_string().into()];
 
-        if let Some(b_ms) = before_ms {
-            conditions.push("m.created_at_ms < ?".to_string());
-            query_params.push(b_ms.into());
+        if let Some(b_id) = before {
+            let found: Option<(i64, String)> = conn
+                .query_row(
+                    "SELECT created_at_ms, id FROM messages WHERE id = ?1",
+                    params![b_id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+            match found {
+                Some((ms, id)) => {
+                    conditions.push("(m.created_at_ms < ? OR (m.created_at_ms = ? AND (LENGTH(m.id) < LENGTH(?) OR (LENGTH(m.id) = LENGTH(?) AND m.id < ?))))".to_string());
+                    query_params.push(ms.into());
+                    query_params.push(ms.into());
+                    query_params.push(id.clone().into());
+                    query_params.push(id.clone().into());
+                    query_params.push(id.into());
+                }
+                None => {
+                    let valid_snowflake = b_id
+                        .parse::<u64>()
+                        .ok()
+                        .map(|v| v >= 4_194_304)
+                        .unwrap_or(false);
+                    if valid_snowflake {
+                        conditions.push("(LENGTH(m.id) < LENGTH(?) OR (LENGTH(m.id) = LENGTH(?) AND m.id < ?))".to_string());
+                        query_params.push(b_id.to_string().into());
+                        query_params.push(b_id.to_string().into());
+                        query_params.push(b_id.to_string().into());
+                    } else {
+                        return Err(anyhow::anyhow!(
+                            "Anchor message '{}' (before) not found in cache",
+                            b_id
+                        ));
+                    }
+                }
+            }
         }
-        if let Some(a_ms) = after_ms {
-            conditions.push("m.created_at_ms > ?".to_string());
-            query_params.push(a_ms.into());
+
+        if let Some(a_id) = after {
+            let found: Option<(i64, String)> = conn
+                .query_row(
+                    "SELECT created_at_ms, id FROM messages WHERE id = ?1",
+                    params![a_id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+            match found {
+                Some((ms, id)) => {
+                    conditions.push("(m.created_at_ms > ? OR (m.created_at_ms = ? AND (LENGTH(m.id) > LENGTH(?) OR (LENGTH(m.id) = LENGTH(?) AND m.id > ?))))".to_string());
+                    query_params.push(ms.into());
+                    query_params.push(ms.into());
+                    query_params.push(id.clone().into());
+                    query_params.push(id.clone().into());
+                    query_params.push(id.into());
+                }
+                None => {
+                    let valid_snowflake = a_id
+                        .parse::<u64>()
+                        .ok()
+                        .map(|v| v >= 4_194_304)
+                        .unwrap_or(false);
+                    if valid_snowflake {
+                        conditions.push("(LENGTH(m.id) > LENGTH(?) OR (LENGTH(m.id) = LENGTH(?) AND m.id > ?))".to_string());
+                        query_params.push(a_id.to_string().into());
+                        query_params.push(a_id.to_string().into());
+                        query_params.push(a_id.to_string().into());
+                    } else {
+                        return Err(anyhow::anyhow!(
+                            "Anchor message '{}' (after) not found in cache",
+                            a_id
+                        ));
+                    }
+                }
+            }
         }
 
         let where_clause = conditions.join(" AND ");
@@ -479,7 +542,7 @@ impl Db {
              LEFT JOIN users u ON m.author_id = u.id
              LEFT JOIN channels c ON m.channel_id = c.id
              WHERE {}
-             ORDER BY m.created_at_ms DESC
+             ORDER BY m.created_at_ms DESC, LENGTH(m.id) DESC, m.id DESC
              LIMIT {}",
             where_clause, limit
         );
@@ -743,7 +806,7 @@ impl Db {
                         .replace('_', "\\_")
                 );
                 (
-                    "SELECT dm.id, u.id, u.username, u.global_name, u.discriminator, u.avatar
+                    "SELECT dm.id, u.id, u.username, u.global_name, u.discriminator, u.avatar, dm.kind
                      FROM dm_channels dm
                      JOIN users u ON dm.user_id = u.id
                      WHERE u.username LIKE ?1 ESCAPE '\\' OR u.global_name LIKE ?1 ESCAPE '\\' OR dm.name LIKE ?1 ESCAPE '\\'
@@ -752,7 +815,7 @@ impl Db {
                 )
             }
             _ => (
-                "SELECT dm.id, u.id, u.username, u.global_name, u.discriminator, u.avatar
+                "SELECT dm.id, u.id, u.username, u.global_name, u.discriminator, u.avatar, dm.kind
                  FROM dm_channels dm
                  JOIN users u ON dm.user_id = u.id
                  ORDER BY dm.updated_at DESC"
@@ -772,7 +835,7 @@ impl Db {
                     discriminator: r.get(4)?,
                     avatar: r.get(5)?,
                 },
-                kind: 1,
+                kind: r.get(6)?,
             })
         })?;
 
@@ -933,6 +996,120 @@ impl Db {
         Ok(fuzzy)
     }
 
+    pub fn get_message_by_id(&self, id: &str) -> Result<Option<MessageRow>> {
+        let conn = self.conn.lock().unwrap();
+        let sql = "SELECT m.id, m.channel_id, m.author_id, m.content, m.timestamp, m.edited_timestamp,
+                          m.attachments_json, m.embeds_json, m.reply_to, m.created_at_ms,
+                          u.username, u.global_name, c.guild_id, c.name
+                   FROM messages m
+                   LEFT JOIN users u ON m.author_id = u.id
+                   LEFT JOIN channels c ON m.channel_id = c.id
+                   WHERE m.id = ?1";
+        let mut stmt = conn.prepare(sql)?;
+        let row = stmt
+            .query_row(params![id], |r| {
+                Ok(MessageRow {
+                    id: r.get(0)?,
+                    channel_id: r.get(1)?,
+                    author_id: r.get(2)?,
+                    content: r.get(3)?,
+                    timestamp: r.get(4)?,
+                    edited_timestamp: r.get(5)?,
+                    attachments_json: r.get(6)?,
+                    embeds_json: r.get(7)?,
+                    reply_to: r.get(8)?,
+                    created_at_ms: r.get(9)?,
+                    author_username: r.get(10)?,
+                    author_global_name: r.get(11)?,
+                    guild_id: r.get(12)?,
+                    channel_name: r.get(13)?,
+                })
+            })
+            .optional()?;
+        Ok(row)
+    }
+
+    pub fn find_dm_channels_exact(&self, query: &str) -> Result<Vec<DmChannel>> {
+        let q = query.trim();
+        if q.is_empty() {
+            return Ok(vec![]);
+        }
+        let conn = self.conn.lock().unwrap();
+        let sql = "SELECT dm.id, u.id, u.username, u.global_name, u.discriminator, u.avatar, dm.kind
+                   FROM dm_channels dm
+                   JOIN users u ON dm.user_id = u.id
+                   WHERE dm.kind = 1 AND (dm.id = ?1 OR u.id = ?1 OR u.username = ?1 COLLATE NOCASE OR u.global_name = ?1 COLLATE NOCASE)
+                   ORDER BY dm.updated_at DESC";
+        let mut stmt = conn.prepare(sql)?;
+        let rows = stmt.query_map(params![q], |r| {
+            Ok(DmChannel {
+                id: r.get(0)?,
+                recipient: DiscordUser {
+                    id: r.get(1)?,
+                    username: r.get(2)?,
+                    global_name: r.get(3)?,
+                    discriminator: r.get(4)?,
+                    avatar: r.get(5)?,
+                },
+                kind: r.get(6)?,
+            })
+        })?;
+        let mut dms = Vec::new();
+        for d in rows {
+            dms.push(d?);
+        }
+        Ok(dms)
+    }
+
+    pub fn find_guilds_exact(&self, query: &str) -> Result<Vec<DiscordGuild>> {
+        let q = query.trim();
+        if q.is_empty() {
+            return Ok(vec![]);
+        }
+        let conn = self.conn.lock().unwrap();
+        let sql = "SELECT id, name, icon FROM guilds WHERE id = ?1 OR name = ?1 COLLATE NOCASE ORDER BY name ASC";
+        let mut stmt = conn.prepare(sql)?;
+        let rows = stmt.query_map(params![q], |r| {
+            Ok(DiscordGuild {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                icon: r.get(2)?,
+            })
+        })?;
+        let mut guilds = Vec::new();
+        for g in rows {
+            guilds.push(g?);
+        }
+        Ok(guilds)
+    }
+
+    pub fn find_channels_exact(&self, guild_id: &str, query: &str) -> Result<Vec<DiscordChannel>> {
+        let q = query.trim().trim_start_matches('#');
+        if q.is_empty() {
+            return Ok(vec![]);
+        }
+        let conn = self.conn.lock().unwrap();
+        let sql = "SELECT id, guild_id, name, type, topic, parent_id FROM channels
+                   WHERE guild_id = ?1 AND (id = ?2 OR name = ?2 COLLATE NOCASE)
+                   ORDER BY name ASC";
+        let mut stmt = conn.prepare(sql)?;
+        let rows = stmt.query_map(params![guild_id, q], |r| {
+            Ok(DiscordChannel {
+                id: r.get(0)?,
+                guild_id: r.get(1)?,
+                name: r.get(2)?,
+                kind: r.get(3)?,
+                topic: r.get(4)?,
+                parent_id: r.get(5)?,
+            })
+        })?;
+        let mut channels = Vec::new();
+        for c in rows {
+            channels.push(c?);
+        }
+        Ok(channels)
+    }
+
     pub fn stats(&self) -> Result<DbStats> {
         let conn = self.conn.lock().unwrap();
         let users: i64 = conn.query_row("SELECT COUNT(*) FROM users", [], |r| r.get(0))?;
@@ -959,15 +1136,7 @@ impl Db {
 }
 
 pub fn escape_fts5_query(query: &str) -> String {
-    let clean = query
-        .replace('"', " ")
-        .replace('*', " ")
-        .replace('^', " ")
-        .replace(':', " ")
-        .replace('(', " ")
-        .replace(')', " ")
-        .replace('-', " ")
-        .replace('+', " ");
+    let clean = query.replace(['"', '*', '^', ':', '(', ')', '-', '+'], " ");
 
     let terms: Vec<String> = clean
         .split_whitespace()

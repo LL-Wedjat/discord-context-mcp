@@ -1,8 +1,8 @@
 use discord_context_mcp::db::Db;
 use discord_context_mcp::discord::{
-    base64_encode, build_rest_headers, compute_bucket_wait_ms, make_super_properties,
-    normalize_route_key, parse_search_response, rate_limit_delay_ms, Bucket, DiscordClient,
-    SyncReport, USER_AGENT,
+    base64_encode, build_rest_headers, compute_bucket_wait_ms, encode_path_segment,
+    make_super_properties, normalize_route_key, parse_search_response, rate_limit_delay_ms,
+    Bucket, DiscordClient, SyncReport, WriteApiError, USER_AGENT,
 };
 use std::sync::Arc;
 
@@ -407,6 +407,7 @@ async fn test_gateway_toggle_reread_from_disk_across_clones() {
         port: 3774,
         autostart: false,
         gateway_enabled: false,
+        allow_writes: false,
     };
 
     let db = Arc::new(Db::new_in_memory().unwrap());
@@ -436,4 +437,608 @@ async fn test_gateway_toggle_reread_from_disk_across_clones() {
     // assert discord_context_mcp::ui::SettingsApp::new(state.clone()).gateway_toggle == false
     let ui_app = discord_context_mcp::ui::SettingsApp::new(state.clone());
     assert!(!ui_app.gateway_toggle);
+}
+
+#[test]
+fn test_normalize_route_key_reactions_and_at_me() {
+    let put = reqwest::Method::PUT;
+    let delete = reqwest::Method::DELETE;
+    let get = reqwest::Method::GET;
+
+    assert_eq!(
+        normalize_route_key(&put, "/channels/123/messages/456/reactions/%F0%9F%91%8D/@me"),
+        "PUT:/channels/:id/messages/:id/reactions/:emoji/@me"
+    );
+    assert_eq!(
+        normalize_route_key(&delete, "/channels/123/messages/456/reactions/%F0%9F%91%8D/@me"),
+        "DELETE:/channels/:id/messages/:id/reactions/:emoji/@me"
+    );
+    assert_eq!(
+        normalize_route_key(&delete, "/channels/123/messages/456/reactions/custom_emoji:789/@me"),
+        "DELETE:/channels/:id/messages/:id/reactions/:emoji/@me"
+    );
+    assert_eq!(
+        normalize_route_key(&delete, "/channels/123/messages/456/reactions/%F0%9F%91%8D"),
+        "DELETE:/channels/:id/messages/:id/reactions/:emoji"
+    );
+    assert_eq!(
+        normalize_route_key(&get, "/channels/123/messages/456/reactions/%F0%9F%91%8D"),
+        "GET:/channels/:id/messages/:id/reactions/:emoji"
+    );
+}
+
+#[test]
+fn test_encode_path_segment() {
+    // Valid standard emoji
+    assert_eq!(encode_path_segment("👍").unwrap(), "%F0%9F%91%8D");
+    assert_eq!(encode_path_segment("🎉").unwrap(), "%F0%9F%8E%89");
+
+    // Custom emoji name:id
+    assert_eq!(
+        encode_path_segment("pepe_laugh:123456789").unwrap(),
+        "pepe_laugh:123456789"
+    );
+
+    // Unreserved characters: a-z, A-Z, 0-9, -, _, ., ~, :
+    assert_eq!(
+        encode_path_segment("test-1_2.3~4:5").unwrap(),
+        "test-1_2.3~4:5"
+    );
+
+    // Invalid path segments
+    assert!(encode_path_segment("").is_err());
+    assert!(encode_path_segment("   ").is_err());
+    assert!(encode_path_segment(".").is_err());
+    assert!(encode_path_segment("foo bar").is_err());
+    assert!(encode_path_segment("foo/bar").is_err());
+    assert!(encode_path_segment("foo?bar").is_err());
+    assert!(encode_path_segment("foo#bar").is_err());
+    assert!(encode_path_segment("foo..bar").is_err());
+    assert!(encode_path_segment("foo\nbar").is_err());
+    assert!(encode_path_segment("foo\rbar").is_err());
+}
+
+#[tokio::test]
+async fn test_ensure_me_caching_and_deadlock_free() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let hits = Arc::new(AtomicUsize::new(0));
+    let hits_clone = Arc::clone(&hits);
+
+    let app = axum::Router::new().route(
+        "/users/@me",
+        axum::routing::get(move || {
+            let h = Arc::clone(&hits_clone);
+            async move {
+                h.fetch_add(1, Ordering::SeqCst);
+                axum::Json(serde_json::json!({
+                    "id": "user_42",
+                    "username": "tester"
+                }))
+            }
+        }),
+    );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let db = Arc::new(Db::new_in_memory().unwrap());
+    let mut client = DiscordClient::new("test-token".to_string(), db).unwrap();
+    client.base = format!("http://{}", addr);
+    let client = Arc::new(client);
+
+    // First call: hits /users/@me
+    let user_id = client.ensure_me().await.unwrap();
+    assert_eq!(user_id, "user_42");
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+
+    // Second call: cached, no HTTP hit
+    let user_id2 = client.ensure_me().await.unwrap();
+    assert_eq!(user_id2, "user_42");
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+
+    // Concurrent calls should be completely deadlock-free
+    let mut handles = Vec::new();
+    for _ in 0..10 {
+        let c = Arc::clone(&client);
+        handles.push(tokio::spawn(async move {
+            c.ensure_me().await.unwrap()
+        }));
+    }
+    for h in handles {
+        let res = tokio::time::timeout(std::time::Duration::from_secs(2), h)
+            .await
+            .expect("ensure_me timed out / deadlocked")
+            .unwrap();
+        assert_eq!(res, "user_42");
+    }
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn test_rest_write_burst_limit_exceeded() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let hits = Arc::new(AtomicUsize::new(0));
+    let hits_clone = Arc::clone(&hits);
+
+    let app = axum::Router::new().route(
+        "/channels/123/messages",
+        axum::routing::post(move || {
+            let h = Arc::clone(&hits_clone);
+            async move {
+                h.fetch_add(1, Ordering::SeqCst);
+                (
+                    axum::http::StatusCode::OK,
+                    axum::Json(serde_json::json!({
+                        "id": "999",
+                        "channel_id": "123",
+                        "author": { "id": "1", "username": "u" },
+                        "content": "hello",
+                        "timestamp": "2026-01-01T00:00:00Z"
+                    })),
+                )
+            }
+        }),
+    );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let db = Arc::new(Db::new_in_memory().unwrap());
+    let mut client = DiscordClient::new("test-token".to_string(), db).unwrap();
+    client.base = format!("http://{}", addr);
+
+    // 5 write calls should succeed within 60s
+    for i in 0..5 {
+        let res = client
+            .rest_write(
+                reqwest::Method::POST,
+                "/channels/123/messages",
+                Some(&serde_json::json!({ "content": format!("msg {}", i) })),
+            )
+            .await;
+        assert!(res.is_ok(), "Request {} failed: {:?}", i, res.err());
+    }
+    assert_eq!(hits.load(Ordering::SeqCst), 5);
+
+    // 6th call exceeds burst limit
+    let err = client
+        .rest_write(
+            reqwest::Method::POST,
+            "/channels/123/messages",
+            Some(&serde_json::json!({ "content": "msg 6" })),
+        )
+        .await
+        .unwrap_err();
+
+    match err.downcast_ref::<WriteApiError>() {
+        Some(WriteApiError::BurstLimitExceeded { retry_after_secs }) => {
+            assert!(*retry_after_secs > 0 && *retry_after_secs <= 60);
+        }
+        other => panic!("Expected BurstLimitExceeded, got {:?}", other),
+    }
+
+    // Server should NOT have received the 6th call
+    assert_eq!(hits.load(Ordering::SeqCst), 5);
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn test_rest_write_429_fails_fast_without_retrying() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let hits = Arc::new(AtomicUsize::new(0));
+    let hits_clone = Arc::clone(&hits);
+
+    let app = axum::Router::new().route(
+        "/channels/123/messages",
+        axum::routing::post(move || {
+            let h = Arc::clone(&hits_clone);
+            async move {
+                h.fetch_add(1, Ordering::SeqCst);
+                (
+                    axum::http::StatusCode::TOO_MANY_REQUESTS,
+                    axum::Json(serde_json::json!({
+                        "message": "You are being rate limited.",
+                        "retry_after": 2.5
+                    })),
+                )
+            }
+        }),
+    );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let db = Arc::new(Db::new_in_memory().unwrap());
+    let mut client = DiscordClient::new("test-token".to_string(), db).unwrap();
+    client.base = format!("http://{}", addr);
+
+    // First call receives 429
+    let err = client
+        .rest_write(
+            reqwest::Method::POST,
+            "/channels/123/messages",
+            Some(&serde_json::json!({ "content": "hi" })),
+        )
+        .await
+        .unwrap_err();
+
+    match err.downcast_ref::<WriteApiError>() {
+        Some(WriteApiError::RateLimited { retry_after_ms }) => {
+            // 2.5s (2500ms) + 1000ms safety buffer = 3500ms
+            assert_eq!(*retry_after_ms, 3500);
+        }
+        other => panic!("Expected RateLimited, got {:?}", other),
+    }
+
+    // Server hit only once — NO retry occurred!
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+
+    // Second call immediately fails fast before network request
+    let err2 = client
+        .rest_write(
+            reqwest::Method::POST,
+            "/channels/123/messages",
+            Some(&serde_json::json!({ "content": "hi2" })),
+        )
+        .await
+        .unwrap_err();
+
+    match err2.downcast_ref::<WriteApiError>() {
+        Some(WriteApiError::RateLimited { retry_after_ms }) => {
+            assert!(*retry_after_ms > 0);
+        }
+        other => panic!("Expected RateLimited on second call, got {:?}", other),
+    }
+
+    // Server still hit only once
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn test_rest_write_captcha_detection_400_403_429() {
+    let app = axum::Router::new()
+        .route(
+            "/captcha_400",
+            axum::routing::post(|| async {
+                (
+                    axum::http::StatusCode::BAD_REQUEST,
+                    axum::Json(serde_json::json!({
+                        "captcha_key": ["captcha-required"]
+                    })),
+                )
+            }),
+        )
+        .route(
+            "/captcha_403",
+            axum::routing::post(|| async {
+                (
+                    axum::http::StatusCode::FORBIDDEN,
+                    axum::Json(serde_json::json!({
+                        "message": "Captcha required",
+                        "captcha_key": "some_hash"
+                    })),
+                )
+            }),
+        )
+        .route(
+            "/captcha_429",
+            axum::routing::post(|| async {
+                (
+                    axum::http::StatusCode::TOO_MANY_REQUESTS,
+                    axum::Json(serde_json::json!({
+                        "message": "You are being rate limited.",
+                        "captcha_key": "rate_limit_captcha"
+                    })),
+                )
+            }),
+        );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let db = Arc::new(Db::new_in_memory().unwrap());
+    let mut client = DiscordClient::new("test-token".to_string(), db).unwrap();
+    client.base = format!("http://{}", addr);
+
+    let err400 = client
+        .rest_write(reqwest::Method::POST, "/captcha_400", None)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        err400.downcast_ref::<WriteApiError>(),
+        Some(WriteApiError::CaptchaOrChallenge(_))
+    ));
+
+    let err403 = client
+        .rest_write(reqwest::Method::POST, "/captcha_403", None)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        err403.downcast_ref::<WriteApiError>(),
+        Some(WriteApiError::CaptchaOrChallenge(_))
+    ));
+
+    let err429 = client
+        .rest_write(reqwest::Method::POST, "/captcha_429", None)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        err429.downcast_ref::<WriteApiError>(),
+        Some(WriteApiError::CaptchaOrChallenge(_))
+    ));
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn test_rest_write_html_cloudflare_challenge_detection() {
+    let app = axum::Router::new()
+        .route(
+            "/cf_403",
+            axum::routing::post(|| async {
+                (
+                    axum::http::StatusCode::FORBIDDEN,
+                    "<html><head><title>Just a moment...</title></head><body>cf-browser-verification</body></html>",
+                )
+            }),
+        )
+        .route(
+            "/cf_503",
+            axum::routing::post(|| async {
+                (
+                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                    "<!DOCTYPE html><html><body>Attention Required! | Cloudflare</body></html>",
+                )
+            }),
+        );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let db = Arc::new(Db::new_in_memory().unwrap());
+    let mut client = DiscordClient::new("test-token".to_string(), db).unwrap();
+    client.base = format!("http://{}", addr);
+
+    let err_cf403 = client
+        .rest_write(reqwest::Method::POST, "/cf_403", None)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        err_cf403.downcast_ref::<WriteApiError>(),
+        Some(WriteApiError::CaptchaOrChallenge(_))
+    ));
+
+    let err_cf503 = client
+        .rest_write(reqwest::Method::POST, "/cf_503", None)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        err_cf503.downcast_ref::<WriteApiError>(),
+        Some(WriteApiError::CaptchaOrChallenge(_))
+    ));
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn test_rest_write_204_and_reaction_delete_methods() {
+    let app = axum::Router::new()
+        .route(
+            "/channels/123/messages/456",
+            axum::routing::delete(|| async { axum::http::StatusCode::NO_CONTENT }),
+        )
+        .route(
+            "/channels/123/messages/456/reactions/%F0%9F%91%8D/@me",
+            axum::routing::put(|| async { axum::http::StatusCode::NO_CONTENT })
+                .delete(|| async { axum::http::StatusCode::NO_CONTENT }),
+        );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let db = Arc::new(Db::new_in_memory().unwrap());
+    let msg = discord_context_mcp::models::DiscordMessage {
+        id: "456".to_string(),
+        channel_id: "123".to_string(),
+        author: discord_context_mcp::models::DiscordUser {
+            id: "1".to_string(),
+            username: "tester".to_string(),
+            discriminator: None,
+            global_name: None,
+            avatar: None,
+        },
+        content: "to be deleted".to_string(),
+        timestamp: "2026-01-01T00:00:00Z".to_string(),
+        edited_timestamp: None,
+        attachments: vec![],
+        referenced_message: None,
+        message_reference: None,
+    };
+    db.upsert_message(&msg).unwrap();
+    assert!(db.get_message_by_id("456").unwrap().is_some());
+
+    let mut client = DiscordClient::new("test-token".to_string(), db.clone()).unwrap();
+    client.base = format!("http://{}", addr);
+
+    // delete_message succeeds and removes from db
+    client.delete_message("123", "456").await.unwrap();
+    assert!(db.get_message_by_id("456").unwrap().is_none());
+
+    // add_reaction succeeds with 204
+    client.add_reaction("123", "456", "👍").await.unwrap();
+
+    // remove_reaction succeeds with 204
+    client.remove_reaction("123", "456", "👍").await.unwrap();
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn test_send_and_edit_message() {
+    let app = axum::Router::new()
+        .route(
+            "/channels/123/messages",
+            axum::routing::post(|axum::Json(body): axum::Json<serde_json::Value>| async move {
+                assert_eq!(body["content"], "hello world");
+                assert_eq!(body["enforce_nonce"], true);
+                let nonce = body["nonce"].as_str().expect("nonce should be string");
+                assert!(nonce.contains('_'));
+                assert!(nonce.len() <= 25);
+                assert_eq!(body["message_reference"]["message_id"], "999");
+                assert_eq!(body["allowed_mentions"]["replied_user"], true);
+                assert_eq!(body["allowed_mentions"]["parse"], serde_json::json!(["users"]));
+
+                (
+                    axum::http::StatusCode::OK,
+                    axum::Json(serde_json::json!({
+                        "id": "1001",
+                        "channel_id": "123",
+                        "author": { "id": "1", "username": "tester" },
+                        "content": "hello world",
+                        "timestamp": "2026-01-01T00:00:00Z"
+                    })),
+                )
+            }),
+        )
+        .route(
+            "/channels/123/messages/1001",
+            axum::routing::patch(|axum::Json(body): axum::Json<serde_json::Value>| async move {
+                assert_eq!(body["content"], "hello edited");
+                assert_eq!(body["allowed_mentions"]["parse"], serde_json::json!(["users"]));
+
+                (
+                    axum::http::StatusCode::OK,
+                    axum::Json(serde_json::json!({
+                        "id": "1001",
+                        "channel_id": "123",
+                        "author": { "id": "1", "username": "tester" },
+                        "content": "hello edited",
+                        "timestamp": "2026-01-01T00:00:00Z"
+                    })),
+                )
+            }),
+        );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let db = Arc::new(Db::new_in_memory().unwrap());
+    let mut client = DiscordClient::new("test-token".to_string(), db.clone()).unwrap();
+    client.base = format!("http://{}", addr);
+
+    let msg = client
+        .send_message("123", "hello world", Some("999"), true)
+        .await
+        .unwrap();
+    assert_eq!(msg.id, "1001");
+    assert_eq!(msg.content, "hello world");
+    assert_eq!(
+        db.get_message_by_id("1001").unwrap().unwrap().content,
+        "hello world"
+    );
+
+    let edited = client
+        .edit_message("123", "1001", "hello edited")
+        .await
+        .unwrap();
+    assert_eq!(edited.id, "1001");
+    assert_eq!(edited.content, "hello edited");
+    assert_eq!(
+        db.get_message_by_id("1001").unwrap().unwrap().content,
+        "hello edited"
+    );
+
+    server.abort();
+}
+
+#[tokio::test]
+async fn test_fetch_message_around() {
+    let app = axum::Router::new().route(
+        "/channels/123/messages",
+        axum::routing::get(
+            |axum::extract::Query(params): axum::extract::Query<
+                std::collections::HashMap<String, String>,
+            >| async move {
+                assert_eq!(params.get("around").map(String::as_str), Some("456"));
+                assert_eq!(params.get("limit").map(String::as_str), Some("5"));
+
+                axum::Json(serde_json::json!([
+                    {
+                        "id": "455",
+                        "channel_id": "123",
+                        "author": { "id": "1", "username": "u1" },
+                        "content": "msg 455",
+                        "timestamp": "2026-01-01T00:00:00Z"
+                    },
+                    {
+                        "id": "456",
+                        "channel_id": "123",
+                        "author": { "id": "2", "username": "u2" },
+                        "content": "msg 456",
+                        "timestamp": "2026-01-01T00:01:00Z"
+                    },
+                    {
+                        "id": "457",
+                        "channel_id": "123",
+                        "author": { "id": "3", "username": "u3" },
+                        "content": "msg 457",
+                        "timestamp": "2026-01-01T00:02:00Z"
+                    }
+                ]))
+            },
+        ),
+    );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let db = Arc::new(Db::new_in_memory().unwrap());
+    let mut client = DiscordClient::new("test-token".to_string(), db.clone()).unwrap();
+    client.base = format!("http://{}", addr);
+
+    // Matching target id returns Some(msg)
+    let found = client
+        .fetch_message_around("123", "456")
+        .await
+        .unwrap();
+    assert!(found.is_some());
+    assert_eq!(found.unwrap().id, "456");
+
+    // All messages in the around slice were upserted into db
+    assert!(db.get_message_by_id("455").unwrap().is_some());
+    assert!(db.get_message_by_id("456").unwrap().is_some());
+    assert!(db.get_message_by_id("457").unwrap().is_some());
+
+    server.abort();
 }
