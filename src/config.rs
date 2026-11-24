@@ -1,5 +1,6 @@
 use std::env;
-use std::fs;
+use std::fs::{self, File};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -88,36 +89,55 @@ pub fn load_gateway(data_dir: &Path) -> bool {
     read_settings(data_dir).gateway
 }
 
-pub fn save_gateway(data_dir: &Path, enabled: bool) -> Result<()> {
+fn update_settings(data_dir: &Path, update: impl FnOnce(&mut Settings)) -> Result<()> {
     let _guard = SETTINGS_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+
     let settings_file = data_dir.join("settings.json");
-    let mut settings: Settings = fs::read_to_string(&settings_file)
-        .ok()
-        .and_then(|content| serde_json::from_str::<Settings>(&content).ok())
-        .unwrap_or_default();
-    settings.gateway = enabled;
+    let mut settings: Settings = match fs::read_to_string(&settings_file) {
+        Ok(content) => serde_json::from_str::<Settings>(&content)
+            .with_context(|| format!("Failed to parse settings JSON from {}", settings_file.display()))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Settings::default(),
+        Err(e) => return Err(e).with_context(|| format!("Failed to read settings from {}", settings_file.display())),
+    };
+
+    update(&mut settings);
+
     let json = serde_json::to_string_pretty(&settings)?;
-    fs::write(&settings_file, json)
+
+    // Write to a temporary file and rename it into place so readers never
+    // observe a partially written settings.json.
+    let tmp_path = data_dir.join(format!("settings.json.tmp.{}", std::process::id()));
+    let write_result: std::io::Result<()> = (|| {
+        {
+            let mut file = File::create(&tmp_path)?;
+            file.write_all(json.as_bytes())?;
+            file.sync_all()?;
+        }
+        fs::rename(&tmp_path, &settings_file)?;
+        Ok(())
+    })();
+
+    if write_result.is_err() {
+        let _ = fs::remove_file(&tmp_path);
+    }
+
+    write_result
         .with_context(|| format!("Failed to save settings to {}", settings_file.display()))?;
     Ok(())
 }
 
+pub fn save_gateway(data_dir: &Path, enabled: bool) -> Result<()> {
+    update_settings(data_dir, |settings| {
+        settings.gateway = enabled;
+    })
+}
+
 pub fn save_autostart(data_dir: &Path, enabled: bool) -> Result<()> {
-    let _guard = SETTINGS_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let settings_file = data_dir.join("settings.json");
-    let mut settings: Settings = fs::read_to_string(&settings_file)
-        .ok()
-        .and_then(|content| serde_json::from_str::<Settings>(&content).ok())
-        .unwrap_or_default();
-    settings.autostart = enabled;
-    let json = serde_json::to_string_pretty(&settings)?;
-    fs::write(&settings_file, json)
-        .with_context(|| format!("Failed to save settings to {}", settings_file.display()))?;
-    Ok(())
+    update_settings(data_dir, |settings| {
+        settings.autostart = enabled;
+    })
 }
 
 pub fn set_autostart(enabled: bool) -> Result<()> {

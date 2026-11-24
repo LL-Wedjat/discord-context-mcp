@@ -1,7 +1,8 @@
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use eframe::egui::{self, Color32, RichText, ViewportCommand};
+use tokio::sync::mpsc;
 use tracing::{error, info};
 
 use crate::app_state::{AppState, TrayAction};
@@ -16,6 +17,8 @@ pub struct SettingsApp {
     pub autostart_toggle: bool,
     pub gateway_toggle: bool,
     pub is_saving: bool,
+    gateway_tx: mpsc::UnboundedSender<bool>,
+    gateway_in_flight: Arc<AtomicUsize>,
 }
 
 impl SettingsApp {
@@ -34,6 +37,52 @@ impl SettingsApp {
 
         let initial_gateway = state.gateway_enabled.load(Ordering::SeqCst);
 
+        let (gateway_tx, mut gateway_rx) = mpsc::unbounded_channel::<bool>();
+        let gateway_in_flight = Arc::new(AtomicUsize::new(0));
+
+        let state_for_gw = state.clone();
+        let in_flight_for_gw = Arc::clone(&gateway_in_flight);
+        state.tokio_handle.spawn(async move {
+            while let Some(enabled) = gateway_rx.recv().await {
+                let data_dir = state_for_gw.config.data_dir.clone();
+                match config::save_gateway(&data_dir, enabled) {
+                    Ok(()) => {
+                        info!("Gateway preference updated: {}", enabled);
+                        state_for_gw.refresh_gateway_enabled();
+                        if !enabled {
+                            {
+                                let client_lock = state_for_gw.client.lock().await;
+                                if let Some(c) = client_lock.as_ref() {
+                                    // stop() sets the shutdown flag and fires the
+                                    // shutdown Notify, so the gateway wakes from
+                                    // any read/backoff immediately. Only report the
+                                    // gateway as disabled after stop() has run.
+                                    c.stop();
+                                }
+                            }
+                            state_for_gw
+                                .set_status("Gateway preference saved — live gateway disabled");
+                        } else {
+                            state_for_gw.set_status(
+                                "Gateway preference saved — use Reconnect to start the gateway",
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        error!("Failed to save gateway setting: {}", e);
+                        state_for_gw.set_status(format!("Gateway save error: {}", e));
+                    }
+                }
+                in_flight_for_gw.fetch_sub(1, Ordering::SeqCst);
+                {
+                    let guard = state_for_gw.repaint_signal.lock().await;
+                    if let Some(ctx) = guard.as_ref() {
+                        ctx.request_repaint();
+                    }
+                }
+            }
+        });
+
         Self {
             state,
             token_input: String::new(),
@@ -41,6 +90,8 @@ impl SettingsApp {
             autostart_toggle: initial_autostart,
             gateway_toggle: initial_gateway,
             is_saving: false,
+            gateway_tx,
+            gateway_in_flight,
         }
     }
 }
@@ -72,6 +123,11 @@ impl eframe::App for SettingsApp {
 
         // Update validating state from shared AtomicBool
         self.is_saving = self.state.validating.load(Ordering::SeqCst);
+
+        // Sync gateway_toggle from state when no save task is in flight
+        if self.gateway_in_flight.load(Ordering::SeqCst) == 0 {
+            self.gateway_toggle = self.state.gateway_enabled.load(Ordering::SeqCst);
+        }
 
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.vertical_centered(|ui| {
@@ -167,12 +223,12 @@ impl eframe::App for SettingsApp {
                                     // Start the gateway in the background only when the user
                                     // explicitly enabled it. REST-only is the default and must
                                     // also apply to this primary token-setup flow.
-                                    let gateway_enabled = state_clone.refresh_gateway_enabled();
                                     let gw_client = Arc::clone(&new_client);
                                     let gw_token = input_token.clone();
+                                    let state_gw = state_clone.clone();
                                     tokio::spawn(async move {
                                         let _ = gw_client.init().await;
-                                        if gateway_enabled {
+                                        if state_gw.refresh_gateway_enabled() {
                                             let _ = gw_client.start_gateway(gw_token);
                                         }
                                     });
@@ -238,41 +294,12 @@ impl eframe::App for SettingsApp {
                 .changed()
             {
                 let enabled = self.gateway_toggle;
-                let data_dir = self.state.config.data_dir.clone();
-                let state_clone = self.state.clone();
-                let repaint_ctx = ctx.clone();
-
-                self.state.tokio_handle.spawn(async move {
-                    match config::save_gateway(&data_dir, enabled) {
-                        Ok(()) => {
-                            info!("Gateway preference updated: {}", enabled);
-                            state_clone.refresh_gateway_enabled();
-                            if !enabled {
-                                {
-                                    let client_lock = state_clone.client.lock().await;
-                                    if let Some(c) = client_lock.as_ref() {
-                                        // stop() sets the shutdown flag and fires the
-                                        // shutdown Notify, so the gateway wakes from
-                                        // any read/backoff immediately. Only report the
-                                        // gateway as disabled after stop() has run.
-                                        c.stop();
-                                    }
-                                }
-                                state_clone
-                                    .set_status("Gateway preference saved — live gateway disabled");
-                            } else {
-                                state_clone.set_status(
-                                    "Gateway preference saved — use Reconnect to start the gateway",
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            error!("Failed to save gateway setting: {}", e);
-                            state_clone.set_status(format!("Gateway save error: {}", e));
-                        }
-                    }
-                    repaint_ctx.request_repaint();
-                });
+                self.gateway_in_flight.fetch_add(1, Ordering::SeqCst);
+                if self.gateway_tx.send(enabled).is_err() {
+                    // The receiver is gone, so its decrement will never run.
+                    // Balance the counter here to avoid leaking an in-flight slot.
+                    self.gateway_in_flight.fetch_sub(1, Ordering::SeqCst);
+                }
             }
 
             ui.add_space(12.0);

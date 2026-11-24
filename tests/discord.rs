@@ -271,7 +271,7 @@ async fn test_stop_wakes_gateway_shutdown_waiter() {
 fn test_version_strings_use_cargo_package_version() {
     assert!(USER_AGENT.starts_with("discord-context-mcp/"));
     assert!(USER_AGENT.contains(env!("CARGO_PKG_VERSION")));
-    assert!(include_str!("../Cargo.toml").contains("version = \"1.1.0\""));
+    assert!(include_str!("../Cargo.toml").contains(&format!("version = \"{}\"", env!("CARGO_PKG_VERSION"))));
 }
 
 #[test]

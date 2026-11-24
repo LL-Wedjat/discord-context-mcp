@@ -1075,21 +1075,24 @@ async fn test_search_messages_limit_clamp_note() {
     let mock_router = Router::new().route(
         "/channels/c1/messages/search",
         get(|| async {
-            Json(json!({
-                "messages": [[
-                    {
-                        "id": "m_live",
+            let msgs: Vec<serde_json::Value> = (0..25)
+                .map(|i| {
+                    json!({
+                        "id": format!("m_live_{}", i),
                         "channel_id": "c1",
                         "author": {
                             "id": "u1",
                             "username": "alice",
                             "global_name": "Alice"
                         },
-                        "content": "hello world",
+                        "content": format!("hello world {}", i),
                         "timestamp": "2026-02-01T00:00:00Z",
                         "attachments": []
-                    }
-                ]]
+                    })
+                })
+                .collect();
+            Json(json!({
+                "messages": [msgs]
             }))
         }),
     );
@@ -1281,4 +1284,210 @@ async fn test_ping() {
     assert_eq!(null_body["id"], serde_json::Value::Null);
     assert_eq!(null_body["result"], json!({}));
     assert!(null_body.get("error").is_none());
+}
+
+#[tokio::test]
+async fn test_search_messages_limit_clamp_note_omitted_when_fewer_than_25_results() {
+    use axum::routing::get;
+    use axum::Json;
+    use axum::Router;
+    use discord_context_mcp::models::{DiscordChannel, DiscordGuild, DiscordMessage, DiscordUser};
+
+    let db = Arc::new(Db::new_in_memory().expect("in-memory db failed"));
+    let user = DiscordUser {
+        id: "u1".to_string(),
+        username: "alice".to_string(),
+        global_name: Some("Alice".to_string()),
+        discriminator: None,
+        avatar: None,
+    };
+    db.upsert_user(&user).unwrap();
+
+    let guild = DiscordGuild {
+        id: "g1".to_string(),
+        name: "Guild 1".to_string(),
+        icon: None,
+    };
+    db.upsert_guild(&guild).unwrap();
+
+    let channel = DiscordChannel {
+        id: "c1".to_string(),
+        guild_id: Some("g1".to_string()),
+        name: "general".to_string(),
+        kind: 0,
+        topic: None,
+        parent_id: None,
+    };
+    db.upsert_channel(&channel).unwrap();
+
+    let seed_msg = DiscordMessage {
+        id: "m_seed".to_string(),
+        channel_id: "c1".to_string(),
+        author: user.clone(),
+        content: "seed msg".to_string(),
+        timestamp: "2026-01-01T00:00:00Z".to_string(),
+        edited_timestamp: None,
+        attachments: vec![],
+        referenced_message: None,
+    };
+    db.upsert_message(&seed_msg).unwrap();
+
+    let mock_router = Router::new().route(
+        "/channels/c1/messages/search",
+        get(|| async {
+            Json(json!({
+                "messages": [[
+                    {
+                        "id": "m_live",
+                        "channel_id": "c1",
+                        "author": {
+                            "id": "u1",
+                            "username": "alice",
+                            "global_name": "Alice"
+                        },
+                        "content": "hello world",
+                        "timestamp": "2026-02-01T00:00:00Z",
+                        "attachments": []
+                    }
+                ]]
+            }))
+        }),
+    );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, mock_router).await.unwrap();
+    });
+
+    let mut client = DiscordClient::new("test_token".to_string(), db.clone()).unwrap();
+    client.base = format!("http://{}", addr);
+    let ctx = AppContext::new(db, Some(Arc::new(client)));
+
+    let res = call_tool(
+        &ctx,
+        "search_messages",
+        &json!({
+            "text": "hello",
+            "server": "g1",
+            "channel": "c1",
+            "limit": 100
+        }),
+    )
+    .await;
+
+    assert!(res.is_ok(), "search_messages failed: {:?}", res);
+    let text = res.unwrap()["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        !text.contains("clamped to 25"),
+        "did not expect clamp note when fewer than 25 results returned: {}",
+        text
+    );
+}
+
+#[tokio::test]
+async fn test_search_messages_person_resolves_dm_for_user_already_in_db() {
+    use axum::routing::get;
+    use axum::Json;
+    use axum::Router;
+    use discord_context_mcp::models::{DiscordMessage, DiscordUser};
+
+    let db = Arc::new(Db::new_in_memory().expect("in-memory db failed"));
+    let user = DiscordUser {
+        id: "u_guild".to_string(),
+        username: "bob".to_string(),
+        global_name: Some("Bob".to_string()),
+        discriminator: None,
+        avatar: None,
+    };
+    // Bob is already in DB (e.g. from guild member sync), but no DM channel exists in DB yet.
+    db.upsert_user(&user).unwrap();
+
+    // Seed one message so stats.messages > 0
+    let seed_msg = DiscordMessage {
+        id: "m_seed".to_string(),
+        channel_id: "c_other".to_string(),
+        author: user.clone(),
+        content: "seed msg".to_string(),
+        timestamp: "2026-01-01T00:00:00Z".to_string(),
+        edited_timestamp: None,
+        attachments: vec![],
+        referenced_message: None,
+    };
+    db.upsert_message(&seed_msg).unwrap();
+
+    let mock_router = Router::new()
+        .route(
+            "/users/@me/channels",
+            get(|| async {
+                Json(json!([
+                    {
+                        "id": "dm_bob_123",
+                        "type": 1,
+                        "recipients": [
+                            {
+                                "id": "u_guild",
+                                "username": "bob",
+                                "global_name": "Bob"
+                            }
+                        ]
+                    }
+                ]))
+            }),
+        )
+        .route(
+            "/channels/dm_bob_123/messages/search",
+            get(|| async {
+                Json(json!({
+                    "messages": [[
+                        {
+                            "id": "m_dm_hit",
+                            "channel_id": "dm_bob_123",
+                            "author": {
+                                "id": "u_guild",
+                                "username": "bob",
+                                "global_name": "Bob"
+                            },
+                            "content": "secret dm message with bob",
+                            "timestamp": "2026-02-01T00:00:00Z",
+                            "attachments": []
+                        }
+                    ]]
+                }))
+            }),
+        );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, mock_router).await.unwrap();
+    });
+
+    let mut client = DiscordClient::new("test_token".to_string(), db.clone()).unwrap();
+    client.base = format!("http://{}", addr);
+    let ctx = AppContext::new(db, Some(Arc::new(client)));
+
+    let res = call_tool(
+        &ctx,
+        "search_messages",
+        &json!({
+            "text": "secret",
+            "person": "bob"
+        }),
+    )
+    .await;
+
+    assert!(res.is_ok(), "search_messages failed: {:?}", res);
+    let text = res.unwrap()["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        text.contains("secret dm message with bob"),
+        "expected live DM search hit in result text: {}",
+        text
+    );
 }

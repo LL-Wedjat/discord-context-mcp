@@ -726,11 +726,6 @@ pub async fn call_tool(
             let requested_limit = limit_arg.unwrap_or(25);
             const REST_SEARCH_MAX: usize = 25;
             let effective_limit = requested_limit.min(REST_SEARCH_MAX);
-            let truncation_note: Option<String> = if requested_limit > REST_SEARCH_MAX {
-                Some("\n\n_Note: search limit clamped to 25 (Discord REST maximum)._".to_string())
-            } else {
-                None
-            };
             let mut fallback_note: Option<String> = None;
 
             let stats = ctx
@@ -822,6 +817,7 @@ pub async fn call_tool(
             }
 
             let mut author_id = None;
+            let mut dm_refreshed = false;
             if let Some(p) = person_arg {
                 let mut found = ctx
                     .db
@@ -835,6 +831,7 @@ pub async fn call_tool(
                                 c.sanitize(&e.to_string())
                             ));
                         }
+                        dm_refreshed = true;
                         found = ctx
                             .db
                             .find_user(p)
@@ -853,9 +850,10 @@ pub async fn call_tool(
                 }
             }
 
-            // A person-only (DM) search can use the live REST API too, but only
-            // when a cached DM channel exists for that user. Without one we fall
-            // back to the local FTS cache below.
+            // For a person-only (DM) search, check cached DM channels first. If
+            // none is cached yet, perform a live list_dm_channels() refresh and
+            // check again. If no DM channel is found for the user, fall back to
+            // the local FTS cache below.
             let mut dm_channel_id: Option<String> = None;
             if guild_id.is_none() && channel_id.is_none() {
                 if let Some(ref uid) = author_id {
@@ -867,6 +865,25 @@ pub async fn call_tool(
                         .iter()
                         .find(|d| d.recipient.id == *uid)
                         .map(|d| d.id.clone());
+
+                    if dm_channel_id.is_none() && !dm_refreshed {
+                        if let Some(c) = client_ref {
+                            if let Err(e) = c.list_dm_channels().await {
+                                refresh_note = Some(format!(
+                                    "\n\n_Note: live refresh failed: {}; showing cached data._",
+                                    c.sanitize(&e.to_string())
+                                ));
+                            }
+                            let dms = ctx
+                                .db
+                                .list_dm_people(None)
+                                .map_err(|e| sanitize_err(client_ref, &e.to_string()))?;
+                            dm_channel_id = dms
+                                .iter()
+                                .find(|d| d.recipient.id == *uid)
+                                .map(|d| d.id.clone());
+                        }
+                    }
                 }
             }
 
@@ -896,8 +913,10 @@ pub async fn call_tool(
                             } else {
                                 let title = format!("Search: {}", text_arg);
                                 let mut formatted = format_live_messages(&msgs, &title);
-                                if let Some(note) = truncation_note {
-                                    formatted.push_str(&note);
+                                if requested_limit > REST_SEARCH_MAX && msgs.len() >= REST_SEARCH_MAX {
+                                    formatted.push_str(
+                                        "\n\n_Note: search limit clamped to 25 (Discord REST maximum)._",
+                                    );
                                 }
                                 return Ok(text_result(&formatted));
                             }

@@ -1,3 +1,14 @@
+# v1.1.1 - hardening follow-ups
+
+A follow-up to v1.1.0 that tightens the safety and protocol changes shipped there:
+
+- **Opt-in live gateway with immediate shutdown.** The gateway stays OFF by default; the Settings toggle is now applied live, and disabling it fires the shutdown `Notify` so the gateway wakes and stops immediately.
+- **Correct REST 429 backoff accounting.** The concurrency semaphore permit is released during backoff, so rate-limited requests no longer leak permits and stall later calls.
+- **Crash-safe settings writes.** Settings are written atomically to avoid truncated or corrupt config after an interrupted save.
+- **DM-only search scoping with live discovery.** Search can be scoped to DMs, and cached DM channels are checked first with a live `list_dm_channels()` refresh when none is cached yet, falling back to local FTS only if no DM channel is found.
+- **JSON-RPC conformance.** Correct handling of `id: null` notifications and the `ping` method.
+- **Dynamic version reporting.** The REST user-agent and MCP server info now use `CARGO_PKG_VERSION` instead of a hardcoded string.
+
 # v1.1.0 - safer user-token defaults
 
 This release hardens the default posture to match DiscordChatExporter's safety model: live gateway capture is now opt-in, REST traffic no longer impersonates a browser, and message search works without the gateway.
