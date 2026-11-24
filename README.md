@@ -19,7 +19,15 @@ Everything is **read-only** — the tool cannot send, edit, or delete messages.
 1. Download `discord-context-mcp.exe` from the [Releases](https://github.com/LL-Wedjat/discord-context-mcp/releases) tab.
 2. Run it. A tray icon appears (the settings window opens automatically if no token is configured).
 3. Click the tray icon → **Open Settings**, paste your Discord user token, and click **Save**. The token is stored in Windows Credential Manager — never in a plaintext file.
-4. Register the MCP server with your client. For T3 Code / OpenCode, add to `~/.config/opencode/opencode.json`:
+4. **Client registration**: `discord-context-mcp` automatically detects and registers itself on startup (and on **Reconnect**) for installed coding agents:
+   - **OpenCode / T3 Code** (`~/.config/opencode/opencode.json`)
+   - **Codex** (`~/.codex/config.toml`)
+   - **Claude Code** (`~/.claude.json`)
+   - **Antigravity** (`~/.gemini/config/mcp_config.json`)
+
+   Only config directories that already exist are touched (no unused dotfiles are created).
+
+   *Manual registration fallback:* If your client is not auto-detected or you prefer manual setup, add to `~/.config/opencode/opencode.json`:
 
 ```json
 {
@@ -97,5 +105,5 @@ Closing the settings window hides it to the tray; the MCP server keeps running. 
 
 - **Settings window opens on launch** — no token is stored yet; paste one and Save.
 - **Status shows an error after Save** — the token was rejected by Discord; check it and try again.
-- **"Port in use" / client can't connect** — set `DISCORD_MCP_PORT` to another port and update the MCP URL in your client config.
+- **"Port in use" / client can't connect** — set `DISCORD_MCP_PORT` to another port; the MCP URL is updated automatically in supported client configs on launch/Reconnect (edit manually only as a fallback).
 - **Logs** — written to a rotating file in your config directory (`discord-context-mcp/logs`).
