@@ -170,10 +170,19 @@ fn main() -> Result<()> {
             match action {
                 TrayAction::OpenSettings => {
                     info!("Tray: OpenSettings requested");
-                    if let Some(ctx) = state_tray_handler.repaint_signal.lock().await.as_ref() {
-                        ctx.request_repaint();
+
+                    // A hidden Win32 window never receives WM_PAINT, so
+                    // request_repaint() alone cannot flush viewport commands.
+                    // Show the native window first, without holding any lock.
+                    if !state_tray_handler.show_native_window() {
+                        warn!("Native window handle unavailable; falling back to egui viewport commands");
+                    }
+
+                    let ctx_opt = state_tray_handler.repaint_signal.lock().await.clone();
+                    if let Some(ctx) = ctx_opt {
                         ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Visible(true));
                         ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Focus);
+                        ctx.request_repaint();
                     }
                 }
                 TrayAction::Reconnect => {

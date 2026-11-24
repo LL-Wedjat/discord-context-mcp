@@ -67,6 +67,7 @@ pub fn run_tray(state: AppState, event_proxy: UnboundedSender<TrayAction>) -> Re
     let icon = create_tray_icon()?;
 
     let _tray_icon = TrayIconBuilder::new()
+        .with_menu_on_left_click(false)
         .with_menu(Box::new(tray_menu))
         .with_tooltip("Discord Context MCP")
         .with_icon(icon)
@@ -141,6 +142,7 @@ pub fn run_tray(state: AppState, event_proxy: UnboundedSender<TrayAction>) -> Re
     let icon = create_tray_icon()?;
 
     let _tray_icon = TrayIconBuilder::new()
+        .with_menu_on_left_click(false)
         .with_menu(Box::new(tray_menu))
         .with_tooltip("Discord Context MCP")
         .with_icon(icon)

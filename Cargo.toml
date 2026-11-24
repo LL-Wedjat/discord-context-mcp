@@ -34,6 +34,9 @@ egui = "0.31"
 tray-icon = "0.21"
 muda = "0.17"
 
+[target.'cfg(windows)'.dependencies]
+raw-window-handle = "0.6"
+
 [target.'cfg(windows)'.dependencies.windows-sys]
 version = "0.60"
 features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"]

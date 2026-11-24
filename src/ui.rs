@@ -350,6 +350,21 @@ pub fn run_ui(state: AppState) -> eframe::Result<()> {
         Box::new(|cc| {
             *state.repaint_signal.blocking_lock() = Some(cc.egui_ctx.clone());
             cc.egui_ctx.set_visuals(egui::Visuals::dark());
+
+            // Capture the native window handle so the tray can unhide the
+            // window directly when eframe's repaint loop cannot run.
+            #[cfg(windows)]
+            match raw_window_handle::HasWindowHandle::window_handle(cc) {
+                Ok(handle) => {
+                    if let raw_window_handle::RawWindowHandle::Win32(win32) = handle.as_raw() {
+                        state.set_window_hwnd(win32.hwnd.get());
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to capture native window handle: {}", e);
+                }
+            }
+
             Ok(Box::new(SettingsApp::new(state)))
         }),
     )

@@ -1000,6 +1000,7 @@ dependencies = [
  "keyring",
  "muda",
  "once_cell",
+ "raw-window-handle",
  "reqwest",
  "rusqlite",
  "serde",

@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::Mutex;
 
@@ -28,6 +28,8 @@ pub struct AppState {
     pub client: Arc<Mutex<Option<Arc<DiscordClient>>>>,
     pub tokio_handle: tokio::runtime::Handle,
     pub repaint_signal: Arc<Mutex<Option<egui::Context>>>,
+    /// Native window handle (HWND on Windows), captured when the UI is created.
+    pub window_hwnd: Arc<AtomicIsize>,
     pub action_tx: Option<tokio::sync::mpsc::UnboundedSender<TrayAction>>,
 }
 
@@ -57,6 +59,7 @@ impl AppState {
             client: Arc::new(Mutex::new(None)),
             tokio_handle,
             repaint_signal: Arc::new(Mutex::new(None)),
+            window_hwnd: Arc::new(AtomicIsize::new(0)),
             action_tx: None,
         }
     }
@@ -99,4 +102,53 @@ impl AppState {
             }
         });
     }
+
+    pub fn set_window_hwnd(&self, hwnd: isize) {
+        self.window_hwnd.store(hwnd, Ordering::SeqCst);
+    }
+
+    pub fn window_hwnd(&self) -> isize {
+        self.window_hwnd.load(Ordering::SeqCst)
+    }
+
+    /// Reveal the native window directly, bypassing eframe's viewport-command
+    /// queue. A hidden Win32 window is not guaranteed to produce a frame
+    /// (`WM_PAINT`), so queued viewport commands may not flush until the window
+    /// is shown first.
+    pub fn show_native_window(&self) -> bool {
+        #[cfg(windows)]
+        {
+            show_window_by_hwnd(self.window_hwnd())
+        }
+        #[cfg(not(windows))]
+        {
+            false
+        }
+    }
+}
+
+#[cfg(windows)]
+pub fn show_window_by_hwnd(hwnd: isize) -> bool {
+    use windows_sys::Win32::Foundation::HWND;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        IsIconic, IsWindow, SetForegroundWindow, ShowWindow, SW_RESTORE, SW_SHOW,
+    };
+
+    if hwnd == 0 {
+        return false;
+    }
+
+    unsafe {
+        if IsWindow(hwnd as HWND) == 0 {
+            return false;
+        }
+        let cmd = if IsIconic(hwnd as HWND) != 0 {
+            SW_RESTORE
+        } else {
+            SW_SHOW
+        };
+        ShowWindow(hwnd as HWND, cmd);
+        SetForegroundWindow(hwnd as HWND);
+    }
+    true
 }
