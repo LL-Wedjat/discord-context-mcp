@@ -15,6 +15,7 @@ use discord_context_mcp::config::load_config;
 use discord_context_mcp::db::open_db;
 use discord_context_mcp::discord::DiscordClient;
 use discord_context_mcp::mcp::{run_http_server, AppContext};
+use discord_context_mcp::mcp_register::{log_registration_results, register_all_clients};
 use discord_context_mcp::token::{self, load_token};
 use discord_context_mcp::tray::run_tray;
 use discord_context_mcp::ui::run_ui;
@@ -129,6 +130,14 @@ fn main() -> Result<()> {
         }
     });
 
+    // Automatically register with detected MCP clients
+    if let Some(home_dir) = dirs::home_dir() {
+        let reg_results = register_all_clients(&home_dir, config.port);
+        log_registration_results(&reg_results);
+    } else {
+        warn!("Could not determine home directory for MCP client registration");
+    }
+
     // Initialize Discord client & start gateway only if token is present
     if let (true, Some(ref client)) = (token_present, &initial_client) {
         let c_init = Arc::clone(client);
@@ -169,6 +178,23 @@ fn main() -> Result<()> {
                 }
                 TrayAction::Reconnect => {
                     info!("Tray: Reconnect requested");
+                    if let Some(home_dir) = dirs::home_dir() {
+                        let port = state_tray_handler.config.port;
+                        if let Err(e) = tokio::task::spawn_blocking(move || {
+                            let reg_results = register_all_clients(&home_dir, port);
+                            log_registration_results(&reg_results);
+                        })
+                        .await
+                        {
+                            warn!(
+                                "Failed to complete MCP client auto-registration on reconnect: {}",
+                                e
+                            );
+                        }
+                    } else {
+                        warn!("Could not determine home directory for MCP client registration");
+                    }
+
                     let current_token = match token::load_token() {
                         Ok(t) => t,
                         Err(e) => {
