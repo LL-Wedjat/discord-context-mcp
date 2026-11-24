@@ -1,3 +1,14 @@
+# v1.1.2 - automatic MCP client registration
+
+On launch and on the tray Reconnect action, discord-context now registers its streamable-HTTP endpoint with installed AI clients: OpenCode, Codex, Claude Code, and Antigravity.
+
+- **Non-intrusive client detection:** Detects installed clients without creating empty config directories.
+- **Preserves existing configuration:** Preserves other config keys and TOML comments.
+- **Fails fast on malformed configs:** Reports errors rather than clobbering or truncating invalid configs.
+- **Atomic file writes:** Writes config files atomically to prevent corruption.
+- **Idempotent registration:** Clean, repeatable registration across restarts and port changes.
+- **Broad client compatibility:** Migrates existing stdio entries and handles UTF-8 BOMs as well as Antigravity `serverUrl`.
+
 # v1.1.1 - hardening follow-ups
 
 A follow-up to v1.1.0 that tightens the safety and protocol changes shipped there:
