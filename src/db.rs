@@ -200,6 +200,57 @@ impl Db {
         Ok(())
     }
 
+    /// Delete every cached row, preserving the `fts_mode` meta key.
+    ///
+    /// Removing rows from `messages` fires `trg_messages_ad`, which keeps
+    /// `messages_fts` in sync. Everything runs in one transaction so a failure
+    /// cannot leave a partially cleared cache behind.
+    pub fn clear_cache(&self) -> Result<()> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        tx.execute("DELETE FROM messages", [])?;
+        tx.execute("DELETE FROM dm_channels", [])?;
+        tx.execute("DELETE FROM channels", [])?;
+        tx.execute("DELETE FROM guilds", [])?;
+        tx.execute("DELETE FROM users", [])?;
+        tx.execute("DELETE FROM meta WHERE key != 'fts_mode'", [])?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Ensure the cache belongs to `user_id`, clearing it when it does not.
+    ///
+    /// Returns `true` when the cache was cleared (an account switch, or a
+    /// legacy cache with no recorded account) and `false` when the cached
+    /// account already matches.
+    pub fn ensure_account(&self, user_id: &str) -> Result<bool> {
+        let cached_user_id: Option<String> = {
+            let conn = self.conn.lock().unwrap();
+            conn.query_row(
+                "SELECT value FROM meta WHERE key = 'account_user_id'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?
+        };
+
+        if cached_user_id.as_deref() == Some(user_id) {
+            return Ok(false);
+        }
+
+        self.clear_cache()?;
+
+        {
+            let conn = self.conn.lock().unwrap();
+            conn.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES ('account_user_id', ?1)",
+                params![user_id],
+            )?;
+        }
+
+        Ok(true)
+    }
+
     pub fn upsert_user(&self, user: &DiscordUser) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         let now = current_timestamp_ms();

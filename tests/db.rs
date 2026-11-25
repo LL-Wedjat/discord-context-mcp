@@ -1,7 +1,8 @@
-use discord_context_mcp::db::{open_db, SearchFilters};
+use discord_context_mcp::db::{open_db, Db, SearchFilters};
 use discord_context_mcp::models::{
     Attachment, DiscordChannel, DiscordGuild, DiscordMessage, DiscordUser, DmChannel,
 };
+use rusqlite::OptionalExtension;
 use tempfile::tempdir;
 
 #[test]
@@ -873,4 +874,136 @@ fn test_reply_to_fallback_and_tie_break_pagination() {
         .get_messages("c_tie", Some(10), Some("999999999999999999"), None)
         .unwrap();
     assert_eq!(uncached_before.len(), 3);
+}
+
+fn seed_account_data(db: &Db, tag: &str) {
+    let user = DiscordUser {
+        id: format!("u_{}", tag),
+        username: format!("user_{}", tag),
+        global_name: None,
+        discriminator: None,
+        avatar: None,
+    };
+    db.upsert_user(&user).unwrap();
+
+    let guild = DiscordGuild {
+        id: format!("g_{}", tag),
+        name: format!("Guild {}", tag),
+        icon: None,
+    };
+    db.upsert_guild(&guild).unwrap();
+
+    let channel = DiscordChannel {
+        id: format!("c_{}", tag),
+        guild_id: Some(guild.id.clone()),
+        name: "general".to_string(),
+        kind: 0,
+        topic: None,
+        parent_id: None,
+    };
+    db.upsert_channel(&channel).unwrap();
+
+    let dm = DmChannel {
+        id: format!("dm_{}", tag),
+        recipient: user.clone(),
+        kind: 1,
+    };
+    db.upsert_dm_channel(&dm).unwrap();
+
+    let msg = DiscordMessage {
+        id: format!("m_{}", tag),
+        channel_id: channel.id,
+        author: user,
+        content: format!("message from {}", tag),
+        timestamp: "2026-11-22T10:00:00Z".to_string(),
+        edited_timestamp: None,
+        attachments: vec![],
+        referenced_message: None,
+        message_reference: None,
+    };
+    db.upsert_message(&msg).unwrap();
+}
+
+fn read_meta(db_path: &std::path::Path, key: &str) -> Option<String> {
+    let conn = rusqlite::Connection::open(db_path).unwrap();
+    conn.query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| r.get(0))
+        .optional()
+        .unwrap()
+}
+
+fn fts_row_count(db_path: &std::path::Path) -> i64 {
+    let conn = rusqlite::Connection::open(db_path).unwrap();
+    conn.query_row("SELECT COUNT(*) FROM messages_fts", [], |r| r.get(0))
+        .unwrap()
+}
+
+#[test]
+fn test_ensure_account_clears_legacy_cache_and_records_account() {
+    let tmp = tempdir().unwrap();
+    let db_path = tmp.path().join("cache.db");
+    let db = open_db(tmp.path()).unwrap();
+    seed_account_data(&db, "old");
+
+    let fts_mode_before = db.stats().unwrap().fts_mode;
+    assert!(read_meta(&db_path, "account_user_id").is_none());
+
+    assert!(db.ensure_account("user_1").unwrap());
+
+    let stats = db.stats().unwrap();
+    assert_eq!(stats.users, 0);
+    assert_eq!(stats.guilds, 0);
+    assert_eq!(stats.channels, 0);
+    assert_eq!(stats.dm_channels, 0);
+    assert_eq!(stats.messages, 0);
+    assert_eq!(stats.fts_mode, fts_mode_before);
+    assert_eq!(read_meta(&db_path, "account_user_id"), Some("user_1".to_string()));
+    assert_eq!(fts_row_count(&db_path), 0);
+}
+
+#[test]
+fn test_ensure_account_same_account_preserves_rows() {
+    let tmp = tempdir().unwrap();
+    let db_path = tmp.path().join("cache.db");
+    let db = open_db(tmp.path()).unwrap();
+    seed_account_data(&db, "old");
+    assert!(db.ensure_account("user_1").unwrap());
+
+    seed_account_data(&db, "user_1");
+    let before = db.stats().unwrap();
+    assert_eq!(before.messages, 1);
+
+    assert!(!db.ensure_account("user_1").unwrap());
+
+    assert_eq!(db.stats().unwrap(), before);
+    assert!(db.get_message_by_id("m_user_1").unwrap().is_some());
+    assert_eq!(read_meta(&db_path, "account_user_id"), Some("user_1".to_string()));
+}
+
+#[test]
+fn test_ensure_account_switch_clears_previous_account() {
+    let tmp = tempdir().unwrap();
+    let db_path = tmp.path().join("cache.db");
+    let db = open_db(tmp.path()).unwrap();
+
+    seed_account_data(&db, "old");
+    assert!(db.ensure_account("user_1").unwrap());
+    seed_account_data(&db, "user_1");
+    let fts_mode_before = db.stats().unwrap().fts_mode;
+    assert_eq!(db.stats().unwrap().messages, 1);
+    assert_eq!(fts_row_count(&db_path), 1);
+
+    assert!(db.ensure_account("user_2").unwrap());
+
+    let stats = db.stats().unwrap();
+    assert_eq!(stats.users, 0);
+    assert_eq!(stats.guilds, 0);
+    assert_eq!(stats.channels, 0);
+    assert_eq!(stats.dm_channels, 0);
+    assert_eq!(stats.messages, 0);
+    assert_eq!(stats.fts_mode, fts_mode_before);
+    assert_eq!(read_meta(&db_path, "account_user_id"), Some("user_2".to_string()));
+    assert_eq!(fts_row_count(&db_path), 0);
+
+    // A repeated call for the same new account is a no-op.
+    assert!(!db.ensure_account("user_2").unwrap());
 }

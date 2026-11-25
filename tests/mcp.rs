@@ -2078,6 +2078,9 @@ async fn test_own_message_only_edit_delete() {
     let db = Arc::new(Db::new_in_memory().unwrap());
     let mut client = DiscordClient::new("test-token".to_string(), db.clone()).unwrap();
     client.base = format!("http://{}", addr);
+    // Establish the cached account before seeding: init() clears any cache
+    // that belongs to a different (or unrecorded) account.
+    client.init().await.unwrap();
 
     // Seed messages
     db.upsert_message(&discord_context_mcp::models::DiscordMessage {
@@ -2753,6 +2756,12 @@ async fn test_write_tools_strict_parameters_and_no_raw_content_echo() {
     });
 
     let db = Arc::new(Db::new_in_memory().unwrap());
+    let mut client = DiscordClient::new("test-token".to_string(), db.clone()).unwrap();
+    client.base = format!("http://{}", addr);
+    // Establish the cached account before seeding: init() clears any cache
+    // that belongs to a different (or unrecorded) account.
+    client.init().await.unwrap();
+
     db.upsert_guild(&discord_context_mcp::models::DiscordGuild {
         id: "111".to_string(),
         name: "Rust Guild".to_string(),
@@ -2786,9 +2795,6 @@ async fn test_write_tools_strict_parameters_and_no_raw_content_echo() {
         message_reference: None,
     })
     .unwrap();
-
-    let mut client = DiscordClient::new("test-token".to_string(), db.clone()).unwrap();
-    client.base = format!("http://{}", addr);
 
     let allow_writes = Arc::new(std::sync::atomic::AtomicBool::new(true));
     let write_circuit_open = Arc::new(std::sync::atomic::AtomicBool::new(false));

@@ -1,3 +1,42 @@
+# v1.2.0 - opt-in message sending, reactions, pagination, and account switching
+
+This release adds opt-in Discord write tools with account-protection guardrails, read and pagination improvements, T3 Code Antigravity provider auto-registration, and automatic cache clearing when switching Discord accounts.
+
+## Opt-in Discord write tools
+
+Five new write tools are available but **disabled by default** (`allow_writes: false`) behind a Settings checkbox:
+
+- **`send_dm`** — send a direct message to a user.
+- **`send_channel_message`** — send a message to a channel.
+- **`edit_message`** — edit one of your own messages.
+- **`delete_message`** — delete one of your own messages.
+- **`react_message`** — add or remove a reaction on a message.
+
+## Account-protection & safety guardrails
+
+- **5/60s burst cap** — write operations are limited to five per sixty seconds.
+- **Fail-fast 429 handling** — rate-limit responses stop the write immediately rather than retrying or backing off blindly.
+- **Automatic CAPTCHA/challenge circuit breaker** — detected challenges trip a circuit breaker that halts further writes.
+- **Existing 1:1 DMs only** — direct messages can only be sent to conversations that already exist.
+- **Strict target resolution** — message and channel targets are resolved strictly to avoid ambiguous writes.
+- **Own-message-only edit/delete** — edits and deletions are restricted to messages authored by the current account.
+- **`@everyone`/`@here`/role-ping rejection** — mentions that ping broad audiences are rejected.
+- **`<untrusted_discord_messages>` prompt-injection framing** — fetched message content is wrapped in untrusted-data framing to reduce prompt-injection risk.
+
+## Read & pagination improvements
+
+- Message and channel IDs are now exposed on read tools.
+- Reply references are included when reading messages.
+- `before` pagination is available on read tools for paging through history.
+
+## T3 Code Antigravity provider auto-registration
+
+`discord-context` is now registered across all `~/.t3/userdata/providers/antigravity/<id>/config/mcp_config.json` profiles (including 0-byte files), alongside `~/.gemini/config/mcp_config.json`.
+
+## Automatic cache clearing on account switch
+
+The active `account_user_id` is tracked in SQLite. When the Discord account changes, stale cached servers, channels, DMs, and messages are cleared automatically.
+
 # v1.1.2 - automatic MCP client registration
 
 On launch and on the tray Reconnect action, discord-context now registers its streamable-HTTP endpoint with installed AI clients: OpenCode, Codex, Claude Code, and Antigravity.

@@ -275,6 +275,20 @@ impl eframe::App for SettingsApp {
                                         .write_circuit_open
                                         .store(false, Ordering::SeqCst);
 
+                                    // Clear any cache belonging to a previous account before
+                                    // spawning the background init task, so MCP tools see a
+                                    // clean cache for the new account immediately.
+                                    if let Err(e) = state_clone.db.ensure_account(&user.id) {
+                                        error!(
+                                            "Failed to verify cached account in database: {}",
+                                            e
+                                        );
+                                        state_clone.set_status(format!("Cache error: {}", e));
+                                        state_clone.validating.store(false, Ordering::SeqCst);
+                                        repaint_ctx.request_repaint();
+                                        return;
+                                    }
+
                                     // Start the gateway in the background only when the user
                                     // explicitly enabled it. REST-only is the default and must
                                     // also apply to this primary token-setup flow.

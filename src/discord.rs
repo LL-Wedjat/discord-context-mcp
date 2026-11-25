@@ -271,6 +271,17 @@ impl DiscordClient {
         let user: DiscordUser = serde_json::from_value(val)
             .context("Failed to deserialize /users/@me into DiscordUser")?;
 
+        if self
+            .db
+            .ensure_account(&user.id)
+            .context("Failed to verify cached account in database")?
+        {
+            info!(
+                "Cached account changed to {}; cleared stale cache from the previous account",
+                user.id
+            );
+        }
+
         self.db
             .upsert_user(&user)
             .context("Failed to cache @me user in database")?;
