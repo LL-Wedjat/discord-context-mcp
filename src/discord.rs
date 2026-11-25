@@ -1110,6 +1110,7 @@ impl DiscordClient {
 
         let client = reqwest::Client::builder()
             .default_headers(default_headers)
+            .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(15))
             .build()
             .context("Failed to construct reqwest client")?;
