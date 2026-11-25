@@ -202,13 +202,36 @@ impl Db {
 
     /// Delete every cached row, preserving the `fts_mode` meta key.
     ///
-    /// Removing rows from `messages` fires `trg_messages_ad`, which keeps
-    /// `messages_fts` in sync. Everything runs in one transaction so a failure
-    /// cannot leave a partially cleared cache behind.
+    /// Bypasses the per-row `trg_messages_ad` trigger to avoid an O(N^2) full
+    /// table scan on unindexed FTS tables during mass deletion, clearing
+    /// `messages_fts` directly and recreating the trigger in the same
+    /// transaction. Everything runs in one transaction so a failure cannot
+    /// leave a partially cleared cache behind.
     pub fn clear_cache(&self) -> Result<()> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
+
+        tx.execute_batch("DROP TRIGGER IF EXISTS trg_messages_ad;")?;
         tx.execute("DELETE FROM messages", [])?;
+
+        let has_fts: bool = tx
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'messages_fts'",
+                [],
+                |_| Ok(true),
+            )
+            .optional()?
+            .unwrap_or(false);
+
+        if has_fts {
+            tx.execute("DELETE FROM messages_fts", [])?;
+            tx.execute_batch(
+                "CREATE TRIGGER IF NOT EXISTS trg_messages_ad AFTER DELETE ON messages BEGIN
+                     DELETE FROM messages_fts WHERE id = old.id;
+                 END;",
+            )?;
+        }
+
         tx.execute("DELETE FROM dm_channels", [])?;
         tx.execute("DELETE FROM channels", [])?;
         tx.execute("DELETE FROM guilds", [])?;

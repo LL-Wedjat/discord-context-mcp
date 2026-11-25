@@ -1007,3 +1007,96 @@ fn test_ensure_account_switch_clears_previous_account() {
     // A repeated call for the same new account is a no-op.
     assert!(!db.ensure_account("user_2").unwrap());
 }
+
+#[test]
+fn test_clear_cache_clears_fts_and_preserves_trigger() {
+    let tmp = tempdir().unwrap();
+    let db_path = tmp.path().join("cache.db");
+    let db = open_db(tmp.path()).unwrap();
+
+    seed_account_data(&db, "test");
+    let fts_mode_before = db.stats().unwrap().fts_mode;
+    assert_eq!(db.stats().unwrap().messages, 1);
+    assert_eq!(fts_row_count(&db_path), 1);
+
+    db.clear_cache().unwrap();
+
+    let stats = db.stats().unwrap();
+    assert_eq!(stats.messages, 0);
+    assert_eq!(stats.users, 0);
+    assert_eq!(stats.guilds, 0);
+    assert_eq!(stats.channels, 0);
+    assert_eq!(stats.dm_channels, 0);
+    assert_eq!(stats.fts_mode, fts_mode_before);
+    assert_eq!(fts_row_count(&db_path), 0);
+
+    // Verify trigger trg_messages_ad is intact by inserting a new message and then deleting it.
+    let user = DiscordUser {
+        id: "u_new".to_string(),
+        username: "newuser".to_string(),
+        global_name: None,
+        discriminator: None,
+        avatar: None,
+    };
+    let msg = DiscordMessage {
+        id: "m_new".to_string(),
+        channel_id: "c_new".to_string(),
+        author: user,
+        content: "subsequent test message".to_string(),
+        timestamp: "2026-11-22T10:00:00Z".to_string(),
+        edited_timestamp: None,
+        attachments: vec![],
+        referenced_message: None,
+        message_reference: None,
+    };
+    db.upsert_message(&msg).unwrap();
+    assert_eq!(db.stats().unwrap().messages, 1);
+    assert_eq!(fts_row_count(&db_path), 1);
+
+    db.delete_message("m_new").unwrap();
+    assert_eq!(db.stats().unwrap().messages, 0);
+    assert_eq!(fts_row_count(&db_path), 0);
+}
+
+#[test]
+fn test_clear_cache_scale_performance() {
+    let tmp = tempdir().unwrap();
+    let db_path = tmp.path().join("cache.db");
+    let db = open_db(tmp.path()).unwrap();
+
+    // Populate 2,500 messages inside a transaction to trigger trg_messages_ai and fill messages_fts
+    {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let tx = conn.unchecked_transaction().unwrap();
+        let mut stmt = tx
+            .prepare(
+                "INSERT INTO messages (id, channel_id, author_id, content, timestamp, created_at_ms, synced_at)
+                 VALUES (?1, 'c1', 'u1', ?2, '2026-11-22T10:00:00Z', 1000, 1000)",
+            )
+            .unwrap();
+        for i in 0..2500 {
+            stmt.execute(rusqlite::params![
+                format!("m_{}", i),
+                format!("message content {}", i)
+            ])
+            .unwrap();
+        }
+        drop(stmt);
+        tx.commit().unwrap();
+    }
+
+    assert_eq!(db.stats().unwrap().messages, 2500);
+    assert_eq!(fts_row_count(&db_path), 2500);
+
+    let start = std::time::Instant::now();
+    db.clear_cache().unwrap();
+    let elapsed = start.elapsed();
+
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "clear_cache took too long: {:?}",
+        elapsed
+    );
+    assert_eq!(db.stats().unwrap().messages, 0);
+    assert_eq!(fts_row_count(&db_path), 0);
+}

@@ -1,3 +1,12 @@
+# v1.2.1 - fix token validation hang and add Export Logs button
+
+This patch fixes a hang when switching Discord accounts, hardens token validation, and adds a way to export diagnostic logs.
+
+- **Fix cache-clearing hang on account switch.** `Db::clear_cache` bypassed the O(N^2) FTS5 `trg_messages_ad` full-table scan during mass deletion, clearing `messages_fts` directly and recreating the trigger in the same transaction.
+- **Harden token validation.** Add a RAII `ValidatingGuard` that always clears the in-flight flag, move the account cache check to `spawn_blocking`, set a 10s `connect_timeout` in `validate_token`, and add step-by-step diagnostic logging in the Save Token flow.
+- **Export Logs button.** Settings can now bundle log files to Desktop (with a Downloads fallback) and reveal the result in Explorer.
+- **Version display.** The Settings heading and window title now show the app version.
+
 # v1.2.0 - opt-in message sending, reactions, pagination, and account switching
 
 This release adds opt-in Discord write tools with account-protection guardrails, read and pagination improvements, T3 Code Antigravity provider auto-registration, and automatic cache clearing when switching Discord accounts.
