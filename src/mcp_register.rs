@@ -453,10 +453,8 @@ pub fn register_claude_code(home_dir: &Path, port: u16) -> ClientRegistrationRes
     }
 }
 
-pub fn register_antigravity(home_dir: &Path, port: u16) -> ClientRegistrationResult {
+pub fn register_antigravity_at(config_dir: &Path, port: u16) -> ClientRegistrationResult {
     let client = ClientKind::Antigravity;
-    let base_dir = home_dir.join(".gemini");
-    let config_dir = base_dir.join("config");
     let config_path = config_dir.join("mcp_config.json");
 
     if !config_dir.is_dir() && !config_path.exists() {
@@ -488,8 +486,12 @@ pub fn register_antigravity(home_dir: &Path, port: u16) -> ClientRegistrationRes
         let content = fs::read_to_string(&config_path)
             .map_err(|e| format!("Failed to read {}: {}", config_path.display(), e))?;
         let content = content.strip_prefix('\u{feff}').unwrap_or(&content);
-        let mut root: serde_json::Value = serde_json::from_str(content)
-            .map_err(|e| format!("Failed to parse JSON from {}: {}", config_path.display(), e))?;
+        let mut root: serde_json::Value = if content.trim().is_empty() {
+            serde_json::json!({})
+        } else {
+            serde_json::from_str(content)
+                .map_err(|e| format!("Failed to parse JSON from {}: {}", config_path.display(), e))?
+        };
 
         if !root.is_object() {
             return Err(format!(
@@ -570,13 +572,57 @@ pub fn register_antigravity(home_dir: &Path, port: u16) -> ClientRegistrationRes
     }
 }
 
+pub fn register_antigravity(home_dir: &Path, port: u16) -> ClientRegistrationResult {
+    register_antigravity_at(&home_dir.join(".gemini").join("config"), port)
+}
+
+pub fn register_t3_antigravity_providers(
+    home_dir: &Path,
+    port: u16,
+) -> Vec<ClientRegistrationResult> {
+    let base_dir = home_dir
+        .join(".t3")
+        .join("userdata")
+        .join("providers")
+        .join("antigravity");
+
+    if !base_dir.is_dir() {
+        return Vec::new();
+    }
+
+    let entries = match fs::read_dir(&base_dir) {
+        Ok(read_dir) => {
+            let mut paths: Vec<PathBuf> = read_dir
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| p.is_dir())
+                .collect();
+            paths.sort();
+            paths
+        }
+        Err(_) => return Vec::new(),
+    };
+
+    let mut results = Vec::new();
+    for entry in entries {
+        let config_dir = entry.join("config");
+        if config_dir.is_dir() || config_dir.join("mcp_config.json").exists() {
+            results.push(register_antigravity_at(&config_dir, port));
+        }
+    }
+
+    results
+}
+
 pub fn register_all_clients(home_dir: &Path, port: u16) -> Vec<ClientRegistrationResult> {
-    vec![
+    let mut results = vec![
         register_opencode(home_dir, port),
         register_codex(home_dir, port),
         register_claude_code(home_dir, port),
         register_antigravity(home_dir, port),
-    ]
+    ];
+    results.extend(register_t3_antigravity_providers(home_dir, port));
+    results
 }
 
 pub fn log_registration_results(results: &[ClientRegistrationResult]) {

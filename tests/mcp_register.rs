@@ -2,8 +2,9 @@ use std::fs;
 use std::path::Path;
 
 use discord_context_mcp::mcp_register::{
-    atomic_write, register_all_clients, register_antigravity, register_claude_code,
-    register_codex, register_opencode, ClientKind, RegistrationStatus,
+    atomic_write, register_all_clients, register_antigravity, register_antigravity_at,
+    register_claude_code, register_codex, register_opencode, register_t3_antigravity_providers,
+    ClientKind, RegistrationStatus,
 };
 
 fn find_tmp_files(dir: &Path) -> Vec<String> {
@@ -1067,4 +1068,207 @@ fn test_stray_regular_files_at_client_dirs_skipped() {
             res.client
         );
     }
+}
+
+#[test]
+fn test_register_antigravity_at_empty_and_whitespace_mcp_config_json() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let config_dir = temp_dir.path().join("config");
+    fs::create_dir_all(&config_dir).unwrap();
+
+    // 1. 0-byte file
+    let config_path = config_dir.join("mcp_config.json");
+    fs::write(&config_path, b"").unwrap();
+    assert_eq!(fs::metadata(&config_path).unwrap().len(), 0);
+
+    let res = register_antigravity_at(&config_dir, 3774);
+    assert_eq!(res.client, ClientKind::Antigravity);
+    assert_eq!(res.status, Ok(RegistrationStatus::Registered));
+
+    let content = fs::read_to_string(&config_path).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&content).unwrap();
+    assert_eq!(
+        json["mcpServers"]["discord-context"]["url"],
+        "http://127.0.0.1:3774/mcp"
+    );
+
+    // 2. Whitespace-only file (spaces, tabs, newlines)
+    fs::write(&config_path, "   \r\n \t  \n").unwrap();
+    let res_ws = register_antigravity_at(&config_dir, 3774);
+    assert_eq!(res_ws.status, Ok(RegistrationStatus::Registered));
+
+    let content_ws = fs::read_to_string(&config_path).unwrap();
+    let json_ws: serde_json::Value = serde_json::from_str(&content_ws).unwrap();
+    assert_eq!(
+        json_ws["mcpServers"]["discord-context"]["url"],
+        "http://127.0.0.1:3774/mcp"
+    );
+}
+
+#[test]
+fn test_register_all_clients_with_multiple_t3_antigravity_providers() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let home = temp_dir.path();
+
+    // Setup standard clients
+    fs::create_dir_all(home.join(".config").join("opencode")).unwrap();
+    fs::create_dir_all(home.join(".codex")).unwrap();
+    fs::create_dir_all(home.join(".claude")).unwrap();
+    fs::create_dir_all(home.join(".gemini").join("config")).unwrap();
+
+    // Setup T3 Antigravity provider directories:
+    // - provider-1: 0-byte mcp_config.json
+    let p1_config = home
+        .join(".t3")
+        .join("userdata")
+        .join("providers")
+        .join("antigravity")
+        .join("provider-1")
+        .join("config");
+    fs::create_dir_all(&p1_config).unwrap();
+    fs::write(p1_config.join("mcp_config.json"), b"").unwrap();
+
+    // - provider-2: config dir exists, but mcp_config.json is missing
+    let p2_config = home
+        .join(".t3")
+        .join("userdata")
+        .join("providers")
+        .join("antigravity")
+        .join("provider-2")
+        .join("config");
+    fs::create_dir_all(&p2_config).unwrap();
+
+    // - provider-3: existing valid mcp_config.json with other servers
+    let p3_config = home
+        .join(".t3")
+        .join("userdata")
+        .join("providers")
+        .join("antigravity")
+        .join("provider-3")
+        .join("config");
+    fs::create_dir_all(&p3_config).unwrap();
+    fs::write(
+        p3_config.join("mcp_config.json"),
+        r#"{"mcpServers": {"existing": {"url": "http://127.0.0.1:1234/mcp"}}}"#,
+    )
+    .unwrap();
+
+    // - provider-4: no config dir and no mcp_config.json (should be ignored)
+    let p4_dir = home
+        .join(".t3")
+        .join("userdata")
+        .join("providers")
+        .join("antigravity")
+        .join("provider-4");
+    fs::create_dir_all(p4_dir).unwrap();
+
+    // - stray file inside providers/antigravity (not a dir, should be ignored)
+    fs::write(
+        home.join(".t3")
+            .join("userdata")
+            .join("providers")
+            .join("antigravity")
+            .join("stray_file.txt"),
+        "hello",
+    )
+    .unwrap();
+
+    // First run
+    let results = register_all_clients(home, 3774);
+    // 4 standard clients (OpenCode, Codex, Claude Code, Antigravity) + 3 T3 Antigravity providers = 7
+    assert_eq!(results.len(), 7);
+
+    for res in &results {
+        assert_eq!(
+            res.status,
+            Ok(RegistrationStatus::Registered),
+            "Expected {:?} at {:?} to be Registered",
+            res.client,
+            res.config_path
+        );
+    }
+
+    // Verify provider-1 has the server configured
+    let p1_json: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(p1_config.join("mcp_config.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        p1_json["mcpServers"]["discord-context"]["url"],
+        "http://127.0.0.1:3774/mcp"
+    );
+
+    // Verify provider-2 created mcp_config.json
+    let p2_json: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(p2_config.join("mcp_config.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        p2_json["mcpServers"]["discord-context"]["url"],
+        "http://127.0.0.1:3774/mcp"
+    );
+
+    // Verify provider-3 preserved existing server
+    let p3_json: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(p3_config.join("mcp_config.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        p3_json["mcpServers"]["existing"]["url"],
+        "http://127.0.0.1:1234/mcp"
+    );
+    assert_eq!(
+        p3_json["mcpServers"]["discord-context"]["url"],
+        "http://127.0.0.1:3774/mcp"
+    );
+
+    // Verify deterministic ordering of T3 providers
+    let t3_results = register_t3_antigravity_providers(home, 3774);
+    assert_eq!(t3_results.len(), 3);
+    assert_eq!(
+        t3_results[0].config_path,
+        Some(p1_config.join("mcp_config.json"))
+    );
+    assert_eq!(
+        t3_results[1].config_path,
+        Some(p2_config.join("mcp_config.json"))
+    );
+    assert_eq!(
+        t3_results[2].config_path,
+        Some(p3_config.join("mcp_config.json"))
+    );
+
+    // Second run: idempotency
+    let second_run = register_all_clients(home, 3774);
+    assert_eq!(second_run.len(), 7);
+    for res in &second_run {
+        assert_eq!(
+            res.status,
+            Ok(RegistrationStatus::AlreadyConfigured),
+            "Expected {:?} at {:?} to be AlreadyConfigured",
+            res.client,
+            res.config_path
+        );
+    }
+
+    // Third run: port update
+    let updated_run = register_all_clients(home, 9999);
+    assert_eq!(updated_run.len(), 7);
+    for res in &updated_run {
+        assert_eq!(
+            res.status,
+            Ok(RegistrationStatus::Updated),
+            "Expected {:?} at {:?} to be Updated",
+            res.client,
+            res.config_path
+        );
+    }
+    let p1_updated: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(p1_config.join("mcp_config.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        p1_updated["mcpServers"]["discord-context"]["url"],
+        "http://127.0.0.1:9999/mcp"
+    );
 }

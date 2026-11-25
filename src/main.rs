@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -110,7 +111,13 @@ fn main() -> Result<()> {
     let server_port = config.port;
 
     // Set initial client and AppContext into AppState, without creating dummy clients with empty tokens
-    let app_ctx = AppContext::new(Arc::clone(&db), initial_client.clone());
+    let app_ctx = AppContext::with_write_state(
+        Arc::clone(&db),
+        initial_client.clone(),
+        Arc::clone(&state.allow_writes),
+        Arc::clone(&state.write_circuit_open),
+        Arc::clone(&state.repaint_signal),
+    );
 
     let state_ctx = Arc::clone(&state.ctx);
     let state_client = Arc::clone(&state.client);
@@ -240,6 +247,9 @@ fn main() -> Result<()> {
                                 tokio::spawn(async move {
                                     match c_init.init().await {
                                         Ok(user) => {
+                                            state_c
+                                                .write_circuit_open
+                                                .store(false, Ordering::SeqCst);
                                             state_c.set_status(format!(
                                                 "Connected as {}",
                                                 user.username
