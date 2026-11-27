@@ -932,6 +932,35 @@ impl DiscordClient {
         Ok(result)
     }
 
+    pub async fn get_channel_messages(
+        &self,
+        channel_id: &str,
+        limit: usize,
+        before: Option<&str>,
+        after: Option<&str>,
+    ) -> Result<Vec<DiscordMessage>> {
+        let capped_limit = limit.clamp(1, 100);
+        let path = format!("/channels/{}/messages", channel_id);
+
+        let mut query = vec![("limit".to_string(), capped_limit.to_string())];
+        if let Some(b) = before {
+            query.push(("before".to_string(), b.to_string()));
+        }
+        if let Some(a) = after {
+            query.push(("after".to_string(), a.to_string()));
+        }
+
+        let resp = self
+            .rest(reqwest::Method::GET, &path, Some(&query), None)
+            .await?;
+
+        let val = resp.ok_or_else(|| anyhow!("Empty messages response"))?;
+        let messages: Vec<DiscordMessage> =
+            serde_json::from_value(val).context("Failed to deserialize messages array")?;
+
+        Ok(messages)
+    }
+
     pub async fn fetch_messages(
         &self,
         channel_id: &str,

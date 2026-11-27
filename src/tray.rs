@@ -103,15 +103,12 @@ pub fn run_tray(state: AppState, event_proxy: UnboundedSender<TrayAction>) -> Re
 
         // Poll tray icon events (click to open)
         while let Ok(event) = tray_channel.try_recv() {
-            match event {
-                TrayIconEvent::Click {
-                    button: MouseButton::Left,
-                    button_state: MouseButtonState::Up,
-                    ..
-                } => {
-                    let _ = event_proxy.send(TrayAction::OpenSettings);
-                }
-                _ => {}
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event {
+                let _ = event_proxy.send(TrayAction::OpenSettings);
             }
         }
 

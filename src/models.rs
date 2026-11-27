@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct DiscordUser {
@@ -62,6 +63,14 @@ pub struct MessageReference {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct MessageCall {
+    #[serde(default)]
+    pub participants: Vec<String>,
+    #[serde(default)]
+    pub ended_timestamp: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct DiscordMessage {
     pub id: String,
     pub channel_id: String,
@@ -73,6 +82,12 @@ pub struct DiscordMessage {
     pub edited_timestamp: Option<String>,
     #[serde(default)]
     pub attachments: Vec<Attachment>,
+    #[serde(default)]
+    pub embeds: Vec<Value>,
+    #[serde(rename = "type", default)]
+    pub kind: i32,
+    #[serde(default)]
+    pub call: Option<MessageCall>,
     #[serde(default)]
     pub referenced_message: Option<Box<DiscordMessage>>,
     #[serde(default)]
@@ -94,6 +109,12 @@ pub struct PartialDiscordMessage {
     pub edited_timestamp: Option<String>,
     #[serde(default)]
     pub attachments: Option<Vec<Attachment>>,
+    #[serde(default)]
+    pub embeds: Option<Vec<Value>>,
+    #[serde(rename = "type", default)]
+    pub kind: Option<i32>,
+    #[serde(default)]
+    pub call: Option<MessageCall>,
     #[serde(default)]
     pub referenced_message: Option<Box<DiscordMessage>>,
     #[serde(default)]

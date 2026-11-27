@@ -467,7 +467,7 @@ impl eframe::App for SettingsApp {
                                     );
                                     if state_gw.refresh_gateway_enabled() {
                                         info!("Live gateway is enabled; starting gateway connection...");
-                                        let _ = gw_client.start_gateway(gw_token);
+                                        std::mem::drop(gw_client.start_gateway(gw_token));
                                     }
                                 }
                                 Err(e) => {
@@ -594,54 +594,52 @@ impl eframe::App for SettingsApp {
                 if ui
                     .add_enabled(export_enabled, egui::Button::new("Export Logs"))
                     .clicked()
-                {
-                    if self
+                    && self
                         .export_in_flight
                         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
                         .is_ok()
-                    {
-                        let state_clone = self.state.clone();
-                        let in_flight = Arc::clone(&self.export_in_flight);
-                        let repaint_ctx = ctx.clone();
-                        let log_dir = self.state.config.log_dir.clone();
-                        let dest_dir = dirs::desktop_dir()
-                            .or_else(dirs::download_dir)
-                            .unwrap_or_else(|| self.state.config.data_dir.clone());
+                {
+                    let state_clone = self.state.clone();
+                    let in_flight = Arc::clone(&self.export_in_flight);
+                    let repaint_ctx = ctx.clone();
+                    let log_dir = self.state.config.log_dir.clone();
+                    let dest_dir = dirs::desktop_dir()
+                        .or_else(dirs::download_dir)
+                        .unwrap_or_else(|| self.state.config.data_dir.clone());
 
-                        state_clone.set_status("Exporting logs...");
+                    state_clone.set_status("Exporting logs...");
 
-                        self.state.tokio_handle.spawn(async move {
-                            let _guard = ExportGuard {
-                                in_flight,
-                                repaint_ctx,
-                            };
+                    self.state.tokio_handle.spawn(async move {
+                        let _guard = ExportGuard {
+                            in_flight,
+                            repaint_ctx,
+                        };
 
-                            let res = tokio::task::spawn_blocking(move || {
-                                export_logs_to_dir(&log_dir, &dest_dir)
-                            })
-                            .await;
+                        let res = tokio::task::spawn_blocking(move || {
+                            export_logs_to_dir(&log_dir, &dest_dir)
+                        })
+                        .await;
 
-                            match res {
-                                Ok(Ok(path)) => {
-                                    info!("Logs exported successfully to {}", path.display());
-                                    state_clone
-                                        .set_status(format!("Logs exported to {}", path.display()));
-                                    #[cfg(windows)]
-                                    {
-                                        reveal_in_explorer(&path);
-                                    }
-                                }
-                                Ok(Err(e)) => {
-                                    error!("Export logs failed: {}", e);
-                                    state_clone.set_status(format!("Export logs failed: {}", e));
-                                }
-                                Err(e) => {
-                                    error!("Export logs task panicked: {}", e);
-                                    state_clone.set_status(format!("Export logs failed: {}", e));
+                        match res {
+                            Ok(Ok(path)) => {
+                                info!("Logs exported successfully to {}", path.display());
+                                state_clone
+                                    .set_status(format!("Logs exported to {}", path.display()));
+                                #[cfg(windows)]
+                                {
+                                    reveal_in_explorer(&path);
                                 }
                             }
-                        });
-                    }
+                            Ok(Err(e)) => {
+                                error!("Export logs failed: {}", e);
+                                state_clone.set_status(format!("Export logs failed: {}", e));
+                            }
+                            Err(e) => {
+                                error!("Export logs task panicked: {}", e);
+                                state_clone.set_status(format!("Export logs failed: {}", e));
+                            }
+                        }
+                    });
                 }
 
                 if export_in_flight {

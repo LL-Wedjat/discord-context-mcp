@@ -863,6 +863,8 @@ async fn test_rest_write_204_and_reaction_delete_methods() {
 
     let db = Arc::new(Db::new_in_memory().unwrap());
     let msg = discord_context_mcp::models::DiscordMessage {
+        kind: 0,
+        call: None,
         id: "456".to_string(),
         channel_id: "123".to_string(),
         author: discord_context_mcp::models::DiscordUser {
@@ -876,6 +878,7 @@ async fn test_rest_write_204_and_reaction_delete_methods() {
         timestamp: "2026-01-01T00:00:00Z".to_string(),
         edited_timestamp: None,
         attachments: vec![],
+        embeds: vec![],
         referenced_message: None,
         message_reference: None,
     };

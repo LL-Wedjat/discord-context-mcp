@@ -52,7 +52,6 @@ By default, operations are **read-only** — the tool cannot send, edit, delete,
       "discord-context": {
         "type": "remote",
         "url": "http://127.0.0.1:3774/mcp",
-        "enabled": true,
         "timeout": 60000
       }
     }
@@ -93,7 +92,7 @@ Closing the settings window hides it to the tray; the MCP server keeps running.
 - The **autostart** toggle in Settings controls whether the app launches on Windows login.
 - The **Allow sending & modifying messages (ToS / ban risk)** toggle enables or disables write tools. If a Discord CAPTCHA/challenge is detected, the write circuit breaker automatically opens and pauses writes; clicking **Reconnect** or toggling the setting off and on resets the circuit breaker.
 
-## Tools (13)
+## Tools (15)
 
 ### Read Tools (Available by default)
 
@@ -102,11 +101,15 @@ Closing the settings window hides it to the tray; the MCP server keeps running.
 | `list_servers` | `query?` | List Discord servers (guilds) you belong to with server ID and name |
 | `list_channels` | `server`, `query?` | List channels in a server by server name or server ID |
 | `list_dm_people` | `query?` | List DM contacts and recent direct message channels |
-| `read_dm_with` | `person`, `lastN?`, `before?` | Read recent messages in a DM with a user (supports `before` snowflake for pagination) |
-| `read_channel` | `server`, `channel`, `lastN?`, `before?` | Read recent messages from a channel in a server (supports `before` snowflake for pagination) |
+| `read_dm_with` | `person`, `lastN?`, `before?`, `after?`, `cacheOnly?`, `compact?` | Read recent messages in a DM with a user (`before`/`after` snowflakes for pagination, `cacheOnly` for offline cache reads; compact local-12hr burst format is the default) |
+| `read_channel` | `server`, `channel`, `lastN?`, `before?`, `after?`, `cacheOnly?`, `compact?` | Read recent messages from a channel in a server (same pagination/cache/format options as `read_dm_with`) |
 | `search_messages` | `text`, `server?`, `channel?`, `person?`, `limit?` | Full-text search across messages with optional server, channel, or person/DM filter |
 | `cache_stats` | — | Return cached database counts (users, guilds, channels, messages) |
 | `refresh` | `scope?` (`all`/`servers`/`dms`), `perChannel?` | Manually sync recent Discord data from the API into local SQLite cache |
+| `sync_channel_history` | `server` + `channel` OR `person`, `maxMessages?`, `before?`, `after?` | Paginate full channel/DM history into the local cache with `channel_sync_state` tracking oldest and newest cursors (1-10000 messages, default 2000; pass `before`/`after` to continue) |
+| `export_cached_chat` | `server` + `channel` OR `person`, `after?`, `before?`, `limit?`, `outputPath?`, `includeUrls?` | Export cached messages in compact format to a path-confined local file under `<data_dir>/exports/` |
+
+`read_dm_with` and `read_channel` use the **compact local-12hr format by default** (`compact: true`). Non-empty compact output ends with both `prev_before: <first_message_id>` and `next_after: <last_message_id>` cursors, so backward (`before`) and forward (`after`) pagination work directly from it. Pass `compact: false` for the verbose format with per-message snowflake IDs (needed for `replyTo` and write tools) and raw attachment URLs.
 
 ### Write Tools (Require "Allow sending & modifying messages")
 
