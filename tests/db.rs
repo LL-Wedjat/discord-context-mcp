@@ -54,6 +54,8 @@ fn test_db_crud_and_stats() {
     db.upsert_dm_channel(&dm1).unwrap();
 
     let msg1 = DiscordMessage {
+        kind: 0,
+        call: None,
         id: "m1".to_string(),
         channel_id: "c1".to_string(),
         author: user1.clone(),
@@ -66,6 +68,7 @@ fn test_db_crud_and_stats() {
             url: "http://example.com/file.png".to_string(),
             proxy_url: None,
         }],
+        embeds: vec![],
         referenced_message: None,
         message_reference: None,
     };
@@ -144,6 +147,25 @@ fn test_prune_stale_guilds() {
     db.upsert_channel(&c1).unwrap();
     db.upsert_channel(&c2).unwrap();
 
+    let sync_keep = discord_context_mcp::db::ChannelSyncState {
+        channel_id: "c_keep".to_string(),
+        oldest_synced_id: Some("1".to_string()),
+        newest_synced_id: Some("2".to_string()),
+        fully_backfilled: true,
+        last_synced_at: Some(100),
+        total_cached: 2,
+    };
+    let sync_drop = discord_context_mcp::db::ChannelSyncState {
+        channel_id: "c_drop".to_string(),
+        oldest_synced_id: Some("1".to_string()),
+        newest_synced_id: Some("2".to_string()),
+        fully_backfilled: true,
+        last_synced_at: Some(100),
+        total_cached: 2,
+    };
+    db.upsert_channel_sync_state(&sync_keep).unwrap();
+    db.upsert_channel_sync_state(&sync_drop).unwrap();
+
     let pruned = db.prune_guilds_not_in(&["g_keep".to_string()]).unwrap();
     assert_eq!(pruned, 2); // 1 guild + 1 channel
 
@@ -156,6 +178,9 @@ fn test_prune_stale_guilds() {
 
     let channels_keep = db.list_channels("g_keep", None).unwrap();
     assert_eq!(channels_keep.len(), 1);
+
+    assert!(db.get_channel_sync_state("c_keep").unwrap().is_some());
+    assert!(db.get_channel_sync_state("c_drop").unwrap().is_none());
 }
 
 #[test]
@@ -173,13 +198,15 @@ fn test_get_messages_ordering_and_pagination() {
 
     for i in 1..=5 {
         let msg = DiscordMessage {
+            kind: 0,
+            call: None,
             id: format!("m{}", i),
             channel_id: "c_test".to_string(),
             author: author.clone(),
             content: format!("Message number {}", i),
             timestamp: format!("2026-11-22T10:0{}:00Z", i),
             edited_timestamp: None,
-            attachments: vec![],
+            attachments: vec![],            embeds: vec![],
             referenced_message: None,
         message_reference: None,
         };
@@ -223,25 +250,29 @@ fn test_search_messages_and_filters() {
     };
 
     let msg1 = DiscordMessage {
+        kind: 0,
+        call: None,
         id: "sm1".to_string(),
         channel_id: "c_s1".to_string(),
         author: user.clone(),
         content: "Apples and oranges are delicious fruits".to_string(),
         timestamp: "2026-11-22T10:01:00Z".to_string(),
         edited_timestamp: None,
-        attachments: vec![],
+        attachments: vec![],        embeds: vec![],
         referenced_message: None,
         message_reference: None,
     };
 
     let msg2 = DiscordMessage {
+        kind: 0,
+        call: None,
         id: "sm2".to_string(),
         channel_id: "c_s2".to_string(),
         author: user.clone(),
         content: "Apples are red and sweet".to_string(),
         timestamp: "2026-11-22T10:02:00Z".to_string(),
         edited_timestamp: None,
-        attachments: vec![],
+        attachments: vec![],        embeds: vec![],
         referenced_message: None,
         message_reference: None,
     };
@@ -296,13 +327,15 @@ fn test_search_messages_like_path() {
     };
 
     let msg = DiscordMessage {
+        kind: 0,
+        call: None,
         id: "m_like_1".to_string(),
         channel_id: "c_like".to_string(),
         author: user,
         content: "Testing like fallback search capability".to_string(),
         timestamp: "2026-11-22T10:00:00Z".to_string(),
         edited_timestamp: None,
-        attachments: vec![],
+        attachments: vec![],        embeds: vec![],
         referenced_message: None,
         message_reference: None,
     };
@@ -323,13 +356,15 @@ fn test_search_messages_like_path() {
         avatar: None,
     };
     let msg_bs = DiscordMessage {
+        kind: 0,
+        call: None,
         id: "m_bs_1".to_string(),
         channel_id: "c_like".to_string(),
         author: user_bs,
         content: r"C:\Windows\System32\cmd.exe path".to_string(),
         timestamp: "2026-11-22T10:05:00Z".to_string(),
         edited_timestamp: None,
-        attachments: vec![],
+        attachments: vec![],        embeds: vec![],
         referenced_message: None,
         message_reference: None,
     };
@@ -491,13 +526,15 @@ fn test_fts5_order_word_not_mangled() {
     };
 
     let msg = DiscordMessage {
+        kind: 0,
+        call: None,
         id: "m_order_1".to_string(),
         channel_id: "c_order".to_string(),
         author: user,
         content: "Your ORDER has been processed successfully".to_string(),
         timestamp: "2026-11-22T10:00:00Z".to_string(),
         edited_timestamp: None,
-        attachments: vec![],
+        attachments: vec![],        embeds: vec![],
         referenced_message: None,
         message_reference: None,
     };
@@ -526,13 +563,15 @@ fn test_partial_message_update_and_created_at_preservation() {
     };
 
     let orig_msg = DiscordMessage {
+        kind: 0,
+        call: None,
         id: "m_update_1".to_string(),
         channel_id: "c_update".to_string(),
         author: author.clone(),
         content: "Original text".to_string(),
         timestamp: "2026-11-22T12:00:00Z".to_string(),
         edited_timestamp: None,
-        attachments: vec![],
+        attachments: vec![],        embeds: vec![],
         referenced_message: None,
         message_reference: None,
     };
@@ -544,6 +583,8 @@ fn test_partial_message_update_and_created_at_preservation() {
 
     // Partial update from Gateway (only content and edited_timestamp, no author/timestamp)
     let partial = PartialDiscordMessage {
+        kind: None,
+        call: None,
         id: "m_update_1".to_string(),
         channel_id: None,
         author: None,
@@ -551,6 +592,7 @@ fn test_partial_message_update_and_created_at_preservation() {
         timestamp: None,
         edited_timestamp: Some("2026-11-22T12:05:00Z".to_string()),
         attachments: None,
+        embeds: None,
         referenced_message: None,
         message_reference: None,
     };
@@ -568,13 +610,15 @@ fn test_partial_message_update_and_created_at_preservation() {
 
     // Test upsert_message ON CONFLICT preserves original created_at_ms
     let duplicate_upsert = DiscordMessage {
+        kind: 0,
+        call: None,
         id: "m_update_1".to_string(),
         channel_id: "c_update".to_string(),
         author: author.clone(),
         content: "Duplicate upsert with synthetic timestamp".to_string(),
         timestamp: "2026-11-22T13:00:00Z".to_string(),
         edited_timestamp: Some("2026-11-22T13:00:00Z".to_string()),
-        attachments: vec![],
+        attachments: vec![],        embeds: vec![],
         referenced_message: None,
         message_reference: None,
     };
@@ -706,13 +750,15 @@ fn test_get_message_by_id_and_find_exact_helpers() {
     db.upsert_dm_channel(&dm_group).unwrap();
 
     let msg = DiscordMessage {
+        kind: 0,
+        call: None,
         id: "m_exact_123".to_string(),
         channel_id: "c_exact1".to_string(),
         author: user.clone(),
         content: "Exact message content".to_string(),
         timestamp: "2026-11-22T10:00:00Z".to_string(),
         edited_timestamp: None,
-        attachments: vec![],
+        attachments: vec![],        embeds: vec![],
         referenced_message: None,
         message_reference: None,
     };
@@ -782,13 +828,15 @@ fn test_reply_to_fallback_and_tie_break_pagination() {
 
     // Upsert with message_reference fallback
     let msg_with_ref = DiscordMessage {
+        kind: 0,
+        call: None,
         id: "m_reply_1".to_string(),
         channel_id: "c_reply".to_string(),
         author: author.clone(),
         content: "Message replying via reference".to_string(),
         timestamp: "2026-11-22T10:00:00Z".to_string(),
         edited_timestamp: None,
-        attachments: vec![],
+        attachments: vec![],        embeds: vec![],
         referenced_message: None,
         message_reference: Some(MessageReference {
             message_id: Some("orig_msg_999".to_string()),
@@ -803,6 +851,8 @@ fn test_reply_to_fallback_and_tie_break_pagination() {
 
     // Partial update with message_reference fallback
     let partial = PartialDiscordMessage {
+        kind: None,
+        call: None,
         id: "m_reply_1".to_string(),
         channel_id: None,
         author: None,
@@ -810,6 +860,7 @@ fn test_reply_to_fallback_and_tie_break_pagination() {
         timestamp: None,
         edited_timestamp: None,
         attachments: None,
+        embeds: None,
         referenced_message: None,
         message_reference: Some(MessageReference {
             message_id: Some("new_ref_888".to_string()),
@@ -825,35 +876,41 @@ fn test_reply_to_fallback_and_tie_break_pagination() {
     // 3 messages with the EXACT same timestamp but distinct snowflake IDs
     let fixed_ts = "2026-11-22T10:00:00Z";
     let m1 = DiscordMessage {
+        kind: 0,
+        call: None,
         id: "100000000000000001".to_string(),
         channel_id: "c_tie".to_string(),
         author: author.clone(),
         content: "First".to_string(),
         timestamp: fixed_ts.to_string(),
         edited_timestamp: None,
-        attachments: vec![],
+        attachments: vec![],        embeds: vec![],
         referenced_message: None,
         message_reference: None,
     };
     let m2 = DiscordMessage {
+        kind: 0,
+        call: None,
         id: "100000000000000002".to_string(),
         channel_id: "c_tie".to_string(),
         author: author.clone(),
         content: "Second".to_string(),
         timestamp: fixed_ts.to_string(),
         edited_timestamp: None,
-        attachments: vec![],
+        attachments: vec![],        embeds: vec![],
         referenced_message: None,
         message_reference: None,
     };
     let m3 = DiscordMessage {
+        kind: 0,
+        call: None,
         id: "100000000000000003".to_string(),
         channel_id: "c_tie".to_string(),
         author: author.clone(),
         content: "Third".to_string(),
         timestamp: fixed_ts.to_string(),
         edited_timestamp: None,
-        attachments: vec![],
+        attachments: vec![],        embeds: vec![],
         referenced_message: None,
         message_reference: None,
     };
@@ -911,13 +968,15 @@ fn seed_account_data(db: &Db, tag: &str) {
     db.upsert_dm_channel(&dm).unwrap();
 
     let msg = DiscordMessage {
+        kind: 0,
+        call: None,
         id: format!("m_{}", tag),
         channel_id: channel.id,
         author: user,
         content: format!("message from {}", tag),
         timestamp: "2026-11-22T10:00:00Z".to_string(),
         edited_timestamp: None,
-        attachments: vec![],
+        attachments: vec![],        embeds: vec![],
         referenced_message: None,
         message_reference: None,
     };
@@ -1039,13 +1098,15 @@ fn test_clear_cache_clears_fts_and_preserves_trigger() {
         avatar: None,
     };
     let msg = DiscordMessage {
+        kind: 0,
+        call: None,
         id: "m_new".to_string(),
         channel_id: "c_new".to_string(),
         author: user,
         content: "subsequent test message".to_string(),
         timestamp: "2026-11-22T10:00:00Z".to_string(),
         edited_timestamp: None,
-        attachments: vec![],
+        attachments: vec![],        embeds: vec![],
         referenced_message: None,
         message_reference: None,
     };
@@ -1099,4 +1160,528 @@ fn test_clear_cache_scale_performance() {
     );
     assert_eq!(db.stats().unwrap().messages, 0);
     assert_eq!(fts_row_count(&db_path), 0);
+}
+
+#[test]
+fn test_channel_sync_state_crud_and_clear() {
+    use discord_context_mcp::db::ChannelSyncState;
+
+    let tmp = tempdir().unwrap();
+    let db = open_db(tmp.path()).unwrap();
+
+    let state = ChannelSyncState {
+        channel_id: "ch_sync_1".to_string(),
+        oldest_synced_id: Some("1000".to_string()),
+        newest_synced_id: Some("2000".to_string()),
+        fully_backfilled: true,
+        last_synced_at: Some(1700000000000),
+        total_cached: 100,
+    };
+
+    db.upsert_channel_sync_state(&state).unwrap();
+
+    let fetched = db.get_channel_sync_state("ch_sync_1").unwrap().expect("sync state should exist");
+    assert_eq!(fetched, state);
+
+    // Update state
+    let updated = ChannelSyncState {
+        channel_id: "ch_sync_1".to_string(),
+        oldest_synced_id: Some("500".to_string()),
+        newest_synced_id: Some("3000".to_string()),
+        fully_backfilled: true,
+        last_synced_at: Some(1700000050000),
+        total_cached: 250,
+    };
+    db.upsert_channel_sync_state(&updated).unwrap();
+
+    let fetched2 = db.get_channel_sync_state("ch_sync_1").unwrap().unwrap();
+    assert_eq!(fetched2, updated);
+
+    // clear_cache should wipe channel_sync_state
+    db.clear_cache().unwrap();
+    assert!(db.get_channel_sync_state("ch_sync_1").unwrap().is_none());
+}
+
+#[test]
+fn test_batch_upsert_messages_transaction() {
+    let tmp = tempdir().unwrap();
+    let db = open_db(tmp.path()).unwrap();
+
+    let author1 = DiscordUser {
+        id: "u_batch_1".to_string(),
+        username: "user_one".to_string(),
+        global_name: Some("User One".to_string()),
+        discriminator: None,
+        avatar: None,
+    };
+
+    let author2 = DiscordUser {
+        id: "u_batch_2".to_string(),
+        username: "user_two".to_string(),
+        global_name: None,
+        discriminator: None,
+        avatar: None,
+    };
+
+    let messages = vec![
+        DiscordMessage {
+            kind: 0,
+            call: None,
+            id: "bm1".to_string(),
+            channel_id: "ch_b".to_string(),
+            author: author1.clone(),
+            content: "Batch message 1".to_string(),
+            timestamp: "2026-11-22T10:00:00Z".to_string(),
+            edited_timestamp: None,
+            attachments: vec![Attachment {
+                id: "att_b1".to_string(),
+                filename: "file1.txt".to_string(),
+                url: "http://example.com/file1.txt".to_string(),
+                proxy_url: None,
+            }],
+            embeds: vec![serde_json::json!({
+                "title": "Batch Embed",
+                "description": "Batch Embed Desc"
+            })],
+            referenced_message: None,
+            message_reference: None,
+        },
+        DiscordMessage {
+            kind: 0,
+            call: None,
+            id: "bm2".to_string(),
+            channel_id: "ch_b".to_string(),
+            author: author2.clone(),
+            content: "Batch message 2".to_string(),
+            timestamp: "2026-11-22T10:01:00Z".to_string(),
+            edited_timestamp: None,
+            attachments: vec![],
+            embeds: vec![],
+            referenced_message: Some(Box::new(DiscordMessage {
+                kind: 0,
+                call: None,
+                id: "bm1".to_string(),
+                channel_id: "ch_b".to_string(),
+                author: author1.clone(),
+                content: "Batch message 1".to_string(),
+                timestamp: "2026-11-22T10:00:00Z".to_string(),
+                edited_timestamp: None,
+                attachments: vec![],
+                embeds: vec![],
+                referenced_message: None,
+                message_reference: None,
+            })),
+            message_reference: None,
+        },
+    ];
+
+    let count = db.batch_upsert_messages(&messages).unwrap();
+    assert_eq!(count, 2);
+
+    let rows = db.get_messages("ch_b", None, None, None).unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].id, "bm1");
+    assert_eq!(rows[0].author_username, Some("user_one".to_string()));
+    assert!(rows[0].embeds_json.as_deref().unwrap().contains("Batch Embed"));
+    assert_eq!(rows[1].id, "bm2");
+    assert_eq!(rows[1].embeds_json, None);
+    assert_eq!(rows[1].reply_to, Some("bm1".to_string()));
+
+    // Single upsert_message with embeds persistence
+    let single_msg = DiscordMessage {
+        kind: 0,
+        call: None,
+        id: "bm3".to_string(),
+        channel_id: "ch_b".to_string(),
+        author: author1.clone(),
+        content: "Single message with embed".to_string(),
+        timestamp: "2026-11-22T10:02:00Z".to_string(),
+        edited_timestamp: None,
+        attachments: vec![],
+        embeds: vec![serde_json::json!({
+            "title": "Single Embed",
+            "url": "https://example.com"
+        })],
+        referenced_message: None,
+        message_reference: None,
+    };
+    db.upsert_message(&single_msg).unwrap();
+    let rows3 = db.get_messages("ch_b", None, None, None).unwrap();
+    assert_eq!(rows3.len(), 3);
+    let r3 = rows3.iter().find(|r| r.id == "bm3").unwrap();
+    assert!(r3.embeds_json.as_deref().unwrap().contains("Single Embed"));
+
+    // Empty batch does nothing and returns Ok(0)
+    assert_eq!(db.batch_upsert_messages(&[]).unwrap(), 0);
+}
+
+#[test]
+fn test_get_channel_messages_paginated() {
+    let tmp = tempdir().unwrap();
+    let db = open_db(tmp.path()).unwrap();
+
+    let author = DiscordUser {
+        id: "u_pag".to_string(),
+        username: "pag_user".to_string(),
+        global_name: None,
+        discriminator: None,
+        avatar: None,
+    };
+
+    let mut messages = Vec::new();
+    for i in 1..=6 {
+        messages.push(DiscordMessage {
+            kind: 0,
+            call: None,
+            id: format!("10000000000000000{}", i),
+            channel_id: "ch_pag".to_string(),
+            author: author.clone(),
+            content: format!("Msg {}", i),
+            timestamp: format!("2026-11-22T12:0{}:00Z", i),
+            edited_timestamp: None,
+            attachments: vec![],            embeds: vec![],
+            referenced_message: None,
+            message_reference: None,
+        });
+    }
+    db.batch_upsert_messages(&messages).unwrap();
+
+    assert_eq!(db.count_channel_messages("ch_pag").unwrap(), 6);
+
+    // Ascending: true, no anchors -> oldest to newest
+    let asc_all = db.get_channel_messages_paginated("ch_pag", None, None, 10, true).unwrap();
+    assert_eq!(asc_all.len(), 6);
+    assert_eq!(asc_all[0].id, "100000000000000001");
+    assert_eq!(asc_all[5].id, "100000000000000006");
+
+    // Ascending: false, no anchors -> newest to oldest
+    let desc_all = db.get_channel_messages_paginated("ch_pag", None, None, 10, false).unwrap();
+    assert_eq!(desc_all.len(), 6);
+    assert_eq!(desc_all[0].id, "100000000000000006");
+    assert_eq!(desc_all[5].id, "100000000000000001");
+
+    // Ascending: true with after -> messages after 100000000000000002
+    let after_asc = db.get_channel_messages_paginated("ch_pag", None, Some("100000000000000002"), 2, true).unwrap();
+    assert_eq!(after_asc.len(), 2);
+    assert_eq!(after_asc[0].id, "100000000000000003");
+    assert_eq!(after_asc[1].id, "100000000000000004");
+
+    // Ascending: false with before -> messages before 100000000000000005
+    let before_desc = db.get_channel_messages_paginated("ch_pag", Some("100000000000000005"), None, 2, false).unwrap();
+    assert_eq!(before_desc.len(), 2);
+    assert_eq!(before_desc[0].id, "100000000000000004");
+    assert_eq!(before_desc[1].id, "100000000000000003");
+
+    // Valid snowflake anchor not in cache succeeds for after
+    let valid_after_not_cached = db.get_channel_messages_paginated("ch_pag", None, Some("100000000000000000"), 10, true).unwrap();
+    assert_eq!(valid_after_not_cached.len(), 6);
+    assert_eq!(valid_after_not_cached[0].id, "100000000000000001");
+
+    // Valid snowflake anchor not in cache succeeds for before
+    let valid_before_not_cached = db.get_channel_messages_paginated("ch_pag", Some("999999999999999999"), None, 10, true).unwrap();
+    assert_eq!(valid_before_not_cached.len(), 6);
+    assert_eq!(valid_before_not_cached[5].id, "100000000000000006");
+
+    // Invalid non-snowflake anchor fails fast
+    let err = db.get_channel_messages_paginated("ch_pag", None, Some("not_a_snowflake_and_not_in_db"), 10, true);
+    assert!(err.is_err());
+}
+
+#[test]
+fn test_message_update_embeds_clearing_and_updating() {
+    use discord_context_mcp::models::PartialDiscordMessage;
+    use serde_json::json;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let db = open_db(tmp.path()).unwrap();
+
+    let author = DiscordUser {
+        id: "u_emb_test".to_string(),
+        username: "emb_tester".to_string(),
+        global_name: None,
+        discriminator: None,
+        avatar: None,
+    };
+    db.upsert_user(&author).unwrap();
+
+    let channel = DiscordChannel {
+        id: "c_emb_test".to_string(),
+        guild_id: None,
+        name: "emb-test".to_string(),
+        kind: 0,
+        topic: None,
+        parent_id: None,
+    };
+    db.upsert_channel(&channel).unwrap();
+
+    // 1. Initial insert with an embed
+    let msg = DiscordMessage {
+        kind: 0,
+        call: None,
+        id: "m_emb_1".to_string(),
+        channel_id: "c_emb_test".to_string(),
+        author: author.clone(),
+        content: "Original msg with embed".to_string(),
+        timestamp: "2026-11-25T10:00:00Z".to_string(),
+        edited_timestamp: None,
+        attachments: vec![],
+        embeds: vec![json!({
+            "title": "Initial Embed",
+            "description": "Initial Desc"
+        })],
+        referenced_message: None,
+        message_reference: None,
+    };
+    db.upsert_message(&msg).unwrap();
+
+    let row = db.get_message_by_id("m_emb_1").unwrap().unwrap();
+    assert!(row.embeds_json.is_some());
+    assert!(row.embeds_json.as_ref().unwrap().contains("Initial Embed"));
+
+    // 2. Partial update replacing embed with a new embed
+    let partial_update = PartialDiscordMessage {
+        kind: None,
+        call: None,
+        id: "m_emb_1".to_string(),
+        channel_id: None,
+        author: None,
+        content: None,
+        timestamp: None,
+        edited_timestamp: None,
+        attachments: None,
+        embeds: Some(vec![json!({
+            "title": "Updated Embed"
+        })]),
+        referenced_message: None,
+        message_reference: None,
+    };
+    db.update_partial_message(&partial_update).unwrap();
+
+    let row = db.get_message_by_id("m_emb_1").unwrap().unwrap();
+    assert!(row.embeds_json.is_some());
+    assert!(row.embeds_json.as_ref().unwrap().contains("Updated Embed"));
+    assert!(!row.embeds_json.as_ref().unwrap().contains("Initial Embed"));
+
+    // 3. Partial update clearing embeds with empty array (MESSAGE_UPDATE clears embeds)
+    let partial_clear = PartialDiscordMessage {
+        kind: None,
+        call: None,
+        id: "m_emb_1".to_string(),
+        channel_id: None,
+        author: None,
+        content: None,
+        timestamp: None,
+        edited_timestamp: None,
+        attachments: None,
+        embeds: Some(vec![]),
+        referenced_message: None,
+        message_reference: None,
+    };
+    db.update_partial_message(&partial_clear).unwrap();
+
+    let row = db.get_message_by_id("m_emb_1").unwrap().unwrap();
+    assert!(row.embeds_json.is_none(), "embeds_json should be NULL after clearing");
+
+    // 4. upsert_message clearing embeds
+    let msg_with_emb = DiscordMessage {
+        kind: 0,
+        call: None,
+        id: "m_emb_1".to_string(),
+        channel_id: "c_emb_test".to_string(),
+        author: author.clone(),
+        content: "Re-added embed".to_string(),
+        timestamp: "2026-11-25T10:00:00Z".to_string(),
+        edited_timestamp: None,
+        attachments: vec![],
+        embeds: vec![json!({ "title": "Readded Embed" })],
+        referenced_message: None,
+        message_reference: None,
+    };
+    db.upsert_message(&msg_with_emb).unwrap();
+    assert!(db.get_message_by_id("m_emb_1").unwrap().unwrap().embeds_json.is_some());
+
+    let msg_without_emb = DiscordMessage {
+        kind: 0,
+        call: None,
+        id: "m_emb_1".to_string(),
+        channel_id: "c_emb_test".to_string(),
+        author: author.clone(),
+        content: "Cleared embed via upsert".to_string(),
+        timestamp: "2026-11-25T10:00:00Z".to_string(),
+        edited_timestamp: None,
+        attachments: vec![],
+        embeds: vec![],
+        referenced_message: None,
+        message_reference: None,
+    };
+    db.upsert_message(&msg_without_emb).unwrap();
+    assert!(db.get_message_by_id("m_emb_1").unwrap().unwrap().embeds_json.is_none());
+
+    // 5. batch_upsert_messages clearing embeds
+    let m2 = DiscordMessage {
+        kind: 0,
+        call: None,
+        id: "m_emb_2".to_string(),
+        channel_id: "c_emb_test".to_string(),
+        author: author.clone(),
+        content: "Batch embed test".to_string(),
+        timestamp: "2026-11-25T10:01:00Z".to_string(),
+        edited_timestamp: None,
+        attachments: vec![],
+        embeds: vec![json!({ "title": "Batch Embed" })],
+        referenced_message: None,
+        message_reference: None,
+    };
+    db.batch_upsert_messages(std::slice::from_ref(&m2)).unwrap();
+    assert!(db.get_message_by_id("m_emb_2").unwrap().unwrap().embeds_json.is_some());
+
+    let m2_cleared = DiscordMessage {
+        kind: 0,
+        call: None,
+        embeds: vec![],
+        ..m2
+    };
+    db.batch_upsert_messages(&[m2_cleared]).unwrap();
+    assert!(db.get_message_by_id("m_emb_2").unwrap().unwrap().embeds_json.is_none());
+}
+
+#[test]
+fn test_messages_table_legacy_migration_adds_type_and_call_columns() {
+    let tmp = tempdir().unwrap();
+    let db_path = tmp.path().join("cache.db");
+
+    // Legacy cache: messages table without message_type / call_json.
+    {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE messages (
+                 id TEXT PRIMARY KEY,
+                 channel_id TEXT,
+                 author_id TEXT,
+                 content TEXT,
+                 timestamp TEXT,
+                 edited_timestamp TEXT,
+                 attachments_json TEXT,
+                 embeds_json TEXT,
+                 reply_to TEXT,
+                 created_at_ms INTEGER,
+                 synced_at INTEGER
+             );
+             INSERT INTO messages (id, channel_id, author_id, content, timestamp, created_at_ms)
+             VALUES ('legacy_msg', 'c_legacy', 'u_legacy', 'old message', '2026-01-01T00:00:00Z', 1767225600000);",
+        )
+        .unwrap();
+    }
+
+    // open_db must migrate the legacy table in place and keep existing rows.
+    let db = open_db(tmp.path()).unwrap();
+
+    {
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let mut stmt = conn.prepare("PRAGMA table_info(messages)").unwrap();
+        let cols: Vec<String> = stmt
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .map(|c| c.unwrap())
+            .collect();
+        assert!(cols.contains(&"message_type".to_string()));
+        assert!(cols.contains(&"call_json".to_string()));
+    }
+
+    let row = db.get_message_by_id("legacy_msg").unwrap().unwrap();
+    assert_eq!(row.id, "legacy_msg");
+    assert_eq!(row.message_type, 0);
+    assert_eq!(row.call_json, None);
+}
+
+#[test]
+fn test_message_type_and_call_persist_across_upsert_batch_and_update() {
+    use discord_context_mcp::models::{MessageCall, PartialDiscordMessage};
+
+    let tmp = tempdir().unwrap();
+    let db = open_db(tmp.path()).unwrap();
+
+    let user = DiscordUser {
+        id: "u_call".to_string(),
+        username: "call_user".to_string(),
+        global_name: Some("Call User".to_string()),
+        discriminator: None,
+        avatar: None,
+    };
+    db.upsert_user(&user).unwrap();
+
+    // Single upsert: ongoing call, type 3.
+    let call_msg = DiscordMessage {
+        kind: 3,
+        call: Some(MessageCall {
+            participants: vec!["u_call".to_string(), "u_peer".to_string()],
+            ended_timestamp: None,
+        }),
+        id: "call_single".to_string(),
+        channel_id: "c_call".to_string(),
+        author: user.clone(),
+        content: String::new(),
+        timestamp: "2026-01-01T00:00:00Z".to_string(),
+        edited_timestamp: None,
+        attachments: vec![],
+        embeds: vec![],
+        referenced_message: None,
+        message_reference: None,
+    };
+    db.upsert_message(&call_msg).unwrap();
+
+    let single = db.get_message_by_id("call_single").unwrap().unwrap();
+    assert_eq!(single.message_type, 3);
+    let parsed: MessageCall = serde_json::from_str(single.call_json.as_deref().unwrap()).unwrap();
+    assert_eq!(parsed.participants, vec!["u_call", "u_peer"]);
+    assert_eq!(parsed.ended_timestamp, None);
+
+    // Batch upsert: ended group call, type 3.
+    let batch_msg = DiscordMessage {
+        kind: 3,
+        call: Some(MessageCall {
+            participants: vec![
+                "u_call".to_string(),
+                "u_peer".to_string(),
+                "u_third".to_string(),
+            ],
+            ended_timestamp: Some("2026-01-01T00:42:15Z".to_string()),
+        }),
+        id: "call_batch".to_string(),
+        channel_id: "c_call".to_string(),
+        author: user.clone(),
+        content: String::new(),
+        timestamp: "2026-01-01T00:00:00Z".to_string(),
+        edited_timestamp: None,
+        attachments: vec![],
+        embeds: vec![],
+        referenced_message: None,
+        message_reference: None,
+    };
+    assert_eq!(db.batch_upsert_messages(&[batch_msg]).unwrap(), 1);
+
+    let all = db.get_messages("c_call", None, None, None).unwrap();
+    assert_eq!(all.len(), 2);
+    assert!(all.iter().all(|r| r.message_type == 3));
+    assert!(all.iter().all(|r| r.call_json.is_some()));
+
+    // MESSAGE_UPDATE: the call ends; both type and call payload must be updated.
+    let partial = PartialDiscordMessage {
+        id: "call_single".to_string(),
+        kind: Some(3),
+        call: Some(MessageCall {
+            participants: vec!["u_call".to_string(), "u_peer".to_string()],
+            ended_timestamp: Some("2026-01-01T00:30:00Z".to_string()),
+        }),
+        ..Default::default()
+    };
+    db.update_partial_message(&partial).unwrap();
+
+    let updated = db.get_message_by_id("call_single").unwrap().unwrap();
+    assert_eq!(updated.message_type, 3);
+    let parsed: MessageCall = serde_json::from_str(updated.call_json.as_deref().unwrap()).unwrap();
+    assert_eq!(
+        parsed.ended_timestamp.as_deref(),
+        Some("2026-01-01T00:30:00Z")
+    );
 }

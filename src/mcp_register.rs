@@ -278,14 +278,14 @@ pub fn register_codex(home_dir: &Path, port: u16) -> ClientRegistrationResult {
                     }
                     atomic_write(&config_path, &doc.to_string())
                         .map_err(|e| format!("Failed to write {}: {}", config_path.display(), e))?;
-                    return Ok(RegistrationStatus::Updated);
+                    Ok(RegistrationStatus::Updated)
                 } else {
                     let mut server_table = Table::new();
                     server_table.insert("url", toml_edit::value(&url));
                     table.insert(SERVER_NAME, Item::Table(server_table));
                     atomic_write(&config_path, &doc.to_string())
                         .map_err(|e| format!("Failed to write {}: {}", config_path.display(), e))?;
-                    return Ok(RegistrationStatus::Registered);
+                    Ok(RegistrationStatus::Registered)
                 }
             } else if let Some(inline_table) = mcp_servers_item.as_inline_table_mut() {
                 if let Some(dc_val) = inline_table.get_mut(SERVER_NAME) {
@@ -306,20 +306,20 @@ pub fn register_codex(home_dir: &Path, port: u16) -> ClientRegistrationResult {
                     }
                     atomic_write(&config_path, &doc.to_string())
                         .map_err(|e| format!("Failed to write {}: {}", config_path.display(), e))?;
-                    return Ok(RegistrationStatus::Updated);
+                    Ok(RegistrationStatus::Updated)
                 } else {
                     let mut dc_inline = toml_edit::InlineTable::new();
                     dc_inline.insert("url", url.into());
                     inline_table.insert(SERVER_NAME, toml_edit::Value::InlineTable(dc_inline));
                     atomic_write(&config_path, &doc.to_string())
                         .map_err(|e| format!("Failed to write {}: {}", config_path.display(), e))?;
-                    return Ok(RegistrationStatus::Registered);
+                    Ok(RegistrationStatus::Registered)
                 }
             } else {
-                return Err(format!(
+                Err(format!(
                     "'mcp_servers' in {} is not a table",
                     config_path.display()
-                ));
+                ))
             }
         } else {
             let mut mcp_servers = Table::new();
@@ -330,7 +330,7 @@ pub fn register_codex(home_dir: &Path, port: u16) -> ClientRegistrationResult {
             root_table.insert("mcp_servers", Item::Table(mcp_servers));
             atomic_write(&config_path, &doc.to_string())
                 .map_err(|e| format!("Failed to write {}: {}", config_path.display(), e))?;
-            return Ok(RegistrationStatus::Registered);
+            Ok(RegistrationStatus::Registered)
         }
     })();
 

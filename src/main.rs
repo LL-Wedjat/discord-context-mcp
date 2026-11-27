@@ -158,7 +158,7 @@ fn main() -> Result<()> {
                     info!("Logged in as {}", user.username);
                     state_clone.set_status(format!("Connected as {}", user.username));
                     if state_clone.refresh_gateway_enabled() {
-                        let _ = c_init.start_gateway(c_token);
+                        std::mem::drop(c_init.start_gateway(c_token));
                     }
                 }
                 Err(e) => {
@@ -255,7 +255,7 @@ fn main() -> Result<()> {
                                                 user.username
                                             ));
                                             if state_c.refresh_gateway_enabled() {
-                                                let _ = c_init.start_gateway(tok);
+                                                std::mem::drop(c_init.start_gateway(tok));
                                             }
                                         }
                                         Err(e) => {

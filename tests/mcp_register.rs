@@ -693,7 +693,7 @@ fn test_utf8_bom_stripped_and_registration_succeeds() {
     let opencode_dir = home.join(".config").join("opencode");
     fs::create_dir_all(&opencode_dir).unwrap();
     let opencode_path = opencode_dir.join("opencode.json");
-    let opencode_bom = format!("\u{feff}{{\"theme\": \"dark\"}}");
+    let opencode_bom = "\u{feff}{\"theme\": \"dark\"}".to_string();
     fs::write(&opencode_path, opencode_bom.as_bytes()).unwrap();
 
     let res_opencode = register_opencode(home, 3774);
@@ -719,7 +719,7 @@ fn test_utf8_bom_stripped_and_registration_succeeds() {
     let codex_dir = home.join(".codex");
     fs::create_dir_all(&codex_dir).unwrap();
     let codex_path = codex_dir.join("config.toml");
-    let codex_bom = format!("\u{feff}model = \"gpt-4o\"\n");
+    let codex_bom = "\u{feff}model = \"gpt-4o\"\n".to_string();
     fs::write(&codex_path, codex_bom.as_bytes()).unwrap();
 
     let res_codex = register_codex(home, 3774);
@@ -744,7 +744,7 @@ fn test_utf8_bom_stripped_and_registration_succeeds() {
 
     // 3. JSON client: Claude Code with BOM
     let claude_path = home.join(".claude.json");
-    let claude_bom = format!("\u{feff}{{\"autoUpdaterStatus\": \"enabled\"}}");
+    let claude_bom = "\u{feff}{\"autoUpdaterStatus\": \"enabled\"}".to_string();
     fs::write(&claude_path, claude_bom.as_bytes()).unwrap();
 
     let res_claude = register_claude_code(home, 3774);
@@ -763,7 +763,7 @@ fn test_utf8_bom_stripped_and_registration_succeeds() {
     let ag_dir = home.join(".gemini").join("config");
     fs::create_dir_all(&ag_dir).unwrap();
     let ag_path = ag_dir.join("mcp_config.json");
-    let ag_bom = format!("\u{feff}{{\"enableTelemetry\": true}}");
+    let ag_bom = "\u{feff}{\"enableTelemetry\": true}".to_string();
     fs::write(&ag_path, ag_bom.as_bytes()).unwrap();
 
     let res_ag = register_antigravity(home, 3774);
